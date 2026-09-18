@@ -1,0 +1,325 @@
+# -*- coding: utf-8 -*-
+"""Карточка физического терминала: просмотр + редактирование (с блокировкой)."""
+
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog
+
+import database
+from gui import utils
+
+
+class TerminalCard(tk.Toplevel):
+    def __init__(self, master, user, terminal_id, on_close=None):
+        super().__init__(master)
+        self.user = user
+        self.terminal_id = terminal_id
+        self.on_close_callback = on_close
+        self.read_only = False
+
+        self.title("Терминал")
+        self.geometry("640x560")
+
+        with database.get_connection() as conn:
+            ok, lock_info = database.acquire_lock(conn, "terminal", terminal_id, user["id"])
+        if not ok:
+            self.read_only = True
+            messagebox.showwarning(
+                "Карточка занята",
+                f"Редактирует: {lock_info['locked_by_name']} с {lock_info['locked_at']}.\n"
+                f"Карточка открыта только для просмотра.",
+                parent=self,
+            )
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._build()
+        utils.apply_to_all_entries(self)
+        self._load()
+
+    # ------------------------------------------------------------------
+    def _build(self):
+        top = ttk.Frame(self, padding=10)
+        top.pack(fill="x")
+
+        self.sn_var = tk.StringVar()
+        self.model_var = tk.StringVar()
+        self.ownership_var = tk.StringVar()
+        self.note_var = tk.StringVar()
+
+        ttk.Label(top, text="S/N:").grid(row=0, column=0, sticky="w")
+        ttk.Label(top, textvariable=self.sn_var, font=("TkDefaultFont", 10, "bold")).grid(
+            row=0, column=1, sticky="w"
+        )
+
+        ttk.Label(top, text="Модель:").grid(row=1, column=0, sticky="w")
+        ttk.Entry(top, textvariable=self.model_var, width=30).grid(row=1, column=1, sticky="w")
+
+        ttk.Label(top, text="Владение:").grid(row=2, column=0, sticky="w")
+        ttk.Combobox(top, textvariable=self.ownership_var, values=["bank", "client"],
+                     width=27, state="readonly").grid(row=2, column=1, sticky="w")
+
+        ttk.Label(top, text="Заметка:").grid(row=3, column=0, sticky="w")
+        ttk.Entry(top, textvariable=self.note_var, width=40).grid(row=3, column=1, sticky="w")
+
+        self.state_label = ttk.Label(top, text="", foreground="blue")
+        self.state_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        btns = ttk.Frame(top)
+        btns.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Button(btns, text="Сохранить", command=self._save).pack(side="left", padx=2)
+        ttk.Button(btns, text="Сменить SIM/IP", command=self._change_connection).pack(side="left", padx=2)
+        ttk.Button(btns, text="Переместить...", command=self._move).pack(side="left", padx=2)
+        ttk.Button(btns, text="Отправить в ремонт", command=self._create_repair).pack(side="left", padx=2)
+        self.writeoff_btn = ttk.Button(btns, text="Списать", command=self._write_off)
+        self.writeoff_btn.pack(side="left", padx=2)
+        if self.user["role"] != "admin":
+            self.writeoff_btn.state(["disabled"])
+
+        notebook = ttk.Notebook(self)
+        notebook.pack(fill="both", expand=True, padx=10, pady=10)
+
+        ids_frame = ttk.Frame(notebook)
+        notebook.add(ids_frame, text="Привязанные ID")
+        ids_cols = ("payment_id", "transit_account", "settlement_account", "m_id",
+                    "owner_label", "point_label", "address", "phone")
+        ids_headings = {
+            "payment_id": "ID", "transit_account": "Транз.счёт", "settlement_account": "Расч.счёт",
+            "m_id": "M/id", "owner_label": "ФИО/плательщик", "point_label": "Точка/назначение",
+            "address": "Адрес", "phone": "Телефон",
+        }
+        self.ids_tree = ttk.Treeview(ids_frame, columns=ids_cols, show="headings", height=8)
+        for c in ids_cols:
+            self.ids_tree.heading(c, text=ids_headings[c])
+            self.ids_tree.column(c, width=100, anchor="w")
+        self.ids_tree.pack(fill="both", expand=True)
+        self._binding_ids_by_iid = {}
+        self.close_id_btn = ttk.Button(ids_frame, text="Закрыть выбранный ID", command=self._close_selected_id)
+        self.close_id_btn.pack(anchor="w", pady=(4, 0))
+        if self.user["role"] not in ("admin", "user"):
+            self.close_id_btn.state(["disabled"])
+        self.conn_tree = self._make_tab(notebook, "SIM/IP история",
+                                         ("sim_number", "ip_address", "valid_from", "valid_to"),
+                                         {"sim_number": "SIM", "ip_address": "IP",
+                                          "valid_from": "С", "valid_to": "По"})
+        self.place_tree = self._make_tab(notebook, "Перемещения",
+                                          ("place_type", "m_id", "moved_at", "comment"),
+                                          {"place_type": "Место", "m_id": "M/id",
+                                           "moved_at": "Когда", "comment": "Комментарий"})
+        self.repair_tree = self._make_tab(notebook, "Ремонты",
+                                           ("reason", "sent_at", "returned_at", "firmware_at", "result"),
+                                           {"reason": "Причина", "sent_at": "Отправлен",
+                                            "returned_at": "Вернулся", "firmware_at": "Прошит",
+                                            "result": "Результат"})
+        self.repair_tree.bind("<Double-1>", self._edit_repair)
+
+        if self.read_only:
+            for child in top.winfo_children():
+                if isinstance(child, (ttk.Entry, ttk.Combobox)):
+                    child.state(["disabled"])
+            for b in btns.winfo_children():
+                b.state(["disabled"])
+
+    def _make_tab(self, notebook, title, cols, headings):
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text=title)
+        tree = ttk.Treeview(frame, columns=cols, show="headings", height=8)
+        for c in cols:
+            tree.heading(c, text=headings[c])
+            tree.column(c, width=110, anchor="w")
+        tree.pack(fill="both", expand=True)
+        return tree
+
+    # ------------------------------------------------------------------
+    def _load(self):
+        with database.get_connection() as conn:
+            data = database.get_terminal_full(conn, self.terminal_id)
+        if data is None:
+            messagebox.showerror("Ошибка", "Терминал не найден")
+            self.destroy()
+            return
+        self.data = data
+        t = data["terminal"]
+        self.sn_var.set(t["serial_number"] or "(без S/N)")
+        self.model_var.set(t["model"] or "")
+        self.ownership_var.set(t["ownership"])
+        self.note_var.set(t["note"] or "")
+        self.state_label.config(
+            text=f"Место: {data['current_place']}   Состояние: {data['condition']}"
+        )
+
+        self.ids_tree.delete(*self.ids_tree.get_children())
+        self._binding_ids_by_iid.clear()
+        for b in data["bindings"]:
+            active = " (активна)" if not b["bound_to"] else " (закрыта)"
+            iid = self.ids_tree.insert("", "end", values=(
+                b["payment_id"], b["transit_account"] or "", b["settlement_account"] or "",
+                b["m_id"] or "", (b["owner_label"] or "") + active, b["point_label"] or "",
+                b["address"] or "", b["phone"] or "",
+            ))
+            self._binding_ids_by_iid[iid] = (b["id"], b["bound_to"])
+
+        self.conn_tree.delete(*self.conn_tree.get_children())
+        for c in data["connections"]:
+            self.conn_tree.insert("", "end", values=(
+                c["sim_number"] or "", c["ip_address"] or "", c["valid_from"], c["valid_to"] or "сейчас",
+            ))
+
+        self.place_tree.delete(*self.place_tree.get_children())
+        for p in data["placements"]:
+            self.place_tree.insert("", "end", values=(
+                p["place_type"], p["m_id"] or "", p["moved_at"], p["comment"] or "",
+            ))
+
+        self.repair_tree.delete(*self.repair_tree.get_children())
+        self._repair_ids_by_iid = {}
+        for r in data["repairs"]:
+            iid = self.repair_tree.insert("", "end", values=(
+                r["reason"] or "", r["sent_at"] or "", r["returned_at"] or "",
+                r["firmware_at"] or "", r["result"] or "",
+            ))
+            self._repair_ids_by_iid[iid] = r["id"]
+
+    # ------------------------------------------------------------------
+    def _save(self):
+        if self.read_only:
+            return
+        with database.get_connection() as conn:
+            database.update_terminal(
+                conn, self.terminal_id, self.user["id"],
+                model=self.model_var.get() or None,
+                ownership=self.ownership_var.get(),
+                note=self.note_var.get() or None,
+            )
+        self._load()
+        messagebox.showinfo("Готово", "Изменения сохранены", parent=self)
+
+    def _change_connection(self):
+        if self.read_only:
+            return
+        sim = simpledialog.askstring("SIM", "Новый номер SIM (пусто, если Ethernet):", parent=self)
+        if sim is None:
+            return
+        ip = simpledialog.askstring("IP", "Новый IP-адрес (пусто, если нет):", parent=self)
+        with database.get_connection() as conn:
+            database.change_connection(conn, self.terminal_id, sim or None, ip or None, self.user["id"])
+        self._load()
+
+    def _move(self):
+        if self.read_only:
+            return
+        place = simpledialog.askstring(
+            "Перемещение", "Куда переместить (merchant / warehouse / repair_shop):", parent=self
+        )
+        if place not in ("merchant", "warehouse", "repair_shop"):
+            if place is not None:
+                messagebox.showerror("Ошибка", "Допустимо: merchant / warehouse / repair_shop", parent=self)
+            return
+        merchant_db_id = None
+        if place == "merchant":
+            m_id = simpledialog.askstring("M/id", "M/id мерчанта:", parent=self)
+            if not m_id:
+                return
+            with database.get_connection() as conn:
+                rows = database.search_merchants(conn, m_id)
+            match = next((r for r in rows if r["m_id"] == m_id), None)
+            if not match:
+                messagebox.showerror("Ошибка", f"Мерчант с M/id={m_id} не найден", parent=self)
+                return
+            merchant_db_id = match["id"]
+        comment = simpledialog.askstring("Комментарий", "Комментарий (необязательно):", parent=self) or None
+        with database.get_connection() as conn:
+            database.move_terminal(conn, self.terminal_id, place, self.user["id"],
+                                    merchant_id=merchant_db_id, comment=comment)
+        self._load()
+
+    def _create_repair(self):
+        if self.read_only:
+            return
+        reason = simpledialog.askstring("Ремонт", "Причина неисправности:", parent=self)
+        if reason is None:
+            return
+        sent_at = simpledialog.askstring("Дата", "Дата отправки в ремонт (ГГГГ-ММ-ДД, можно пусто):", parent=self)
+        with database.get_connection() as conn:
+            database.create_repair(conn, self.terminal_id, reason, self.user["id"], sent_at=sent_at or None)
+            database.move_terminal(conn, self.terminal_id, "repair_shop", self.user["id"], comment=reason)
+        self._load()
+
+    def _edit_repair(self, event):
+        if self.read_only:
+            return
+        selection = self.repair_tree.selection()
+        if not selection:
+            return
+        repair_id = self._repair_ids_by_iid.get(selection[0])
+        if repair_id is None:
+            return
+        field = simpledialog.askstring(
+            "Обновить ремонт",
+            "Что заполнить: returned_at / firmware_at / result (введите значение через ':'):\n"
+            "например returned_at:2026-09-12",
+            parent=self,
+        )
+        if not field or ":" not in field:
+            return
+        key, _, value = field.partition(":")
+        key = key.strip()
+        if key not in ("returned_at", "firmware_at", "result", "comment", "reason", "sent_at"):
+            messagebox.showerror("Ошибка", "Неизвестное поле", parent=self)
+            return
+        with database.get_connection() as conn:
+            database.update_repair(conn, repair_id, self.user["id"], **{key: value.strip()})
+        self._load()
+
+    def _write_off(self):
+        if self.user["role"] != "admin":
+            return
+        reason = simpledialog.askstring("Списание", "Причина списания:", parent=self)
+        if reason is None:
+            return
+        if not messagebox.askyesno("Подтверждение", "Списание необратимо. Продолжить?", parent=self):
+            return
+        with database.get_connection() as conn:
+            try:
+                database.write_off_terminal(conn, self.terminal_id, reason, self.user)
+            except PermissionError as exc:
+                messagebox.showerror("Ошибка", str(exc), parent=self)
+                return
+        self._load()
+
+    def _close_selected_id(self):
+        if self.read_only:
+            return
+        selection = self.ids_tree.selection()
+        if not selection:
+            return
+        info = self._binding_ids_by_iid.get(selection[0])
+        if info is None:
+            return
+        binding_id, bound_to = info
+        if bound_to is not None:
+            messagebox.showinfo("Инфо", "Этот ID уже закрыт", parent=self)
+            return
+        comment = simpledialog.askstring("Закрыть ID", "Причина закрытия (необязательно):", parent=self)
+        try:
+            with database.get_connection() as conn:
+                moved_to_warehouse = database.close_terminal_id(
+                    conn, binding_id, self.user["id"], comment=comment or None
+                )
+        except ValueError as exc:
+            messagebox.showerror("Ошибка", str(exc), parent=self)
+            return
+        self._load()
+        if moved_to_warehouse:
+            messagebox.showinfo(
+                "Готово",
+                "ID закрыт. Это была последняя активная привязка -- терминал перемещён на склад.",
+                parent=self,
+            )
+
+    # ------------------------------------------------------------------
+    def _on_close(self):
+        if not self.read_only:
+            with database.get_connection() as conn:
+                database.release_lock(conn, "terminal", self.terminal_id, self.user["id"])
+        if self.on_close_callback:
+            self.on_close_callback()
+        self.destroy()

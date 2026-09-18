@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+
+# Excel temporary files
+~$*.xlsx
+~$*.xls
+
+# Build / distribution
+build/
+dist/
+*.spec
+
+# OS
+Thumbs.db
+Desktop.ini
