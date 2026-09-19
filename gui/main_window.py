@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """Главное окно: вкладки под сводкой, дерево с группировкой
-Тип клиента -> Физ.терминал -> ID. Колонки можно настраивать (порядок,
-видимость, ширины) -- см. кнопку "Колонки...".
-
-Настройки сохраняются в column_settings.json (через gui.column_settings).
+Тип клиента -> Физ.терминал -> ID. Сортировка ID -- по дате выдачи.
+Колонки настраиваются через "Справочники -> Настройки колонок...".
 """
 
 import tkinter as tk
@@ -30,7 +28,6 @@ OWNERSHIP_DISPLAY = {"bank": "Банк", "client": "Клиент"}
 _PREFERRED_TYPE_ORDER = ("bank", "edara", "telekeci", "hk")
 
 
-# Описание колонок для каждой вкладки: {tab_key: (все_колонки, заголовки, ширины_по_умолчанию)}
 def _column_spec():
     return {
         "active": (
@@ -76,6 +73,11 @@ def _first_not_empty(rows, key):
     return ""
 
 
+def _date_sort_key(value):
+    """Пустые значения -- в начало, дальше лексикографически (ISO-даты)."""
+    return value or ""
+
+
 class MainWindow(tk.Tk):
     def __init__(self, user):
         super().__init__()
@@ -88,7 +90,6 @@ class MainWindow(tk.Tk):
         self._pending_restore = None
         self._row_by_iid = {}
 
-        # текущие применённые колонки для вкладки (для сохранения ширин)
         self._current_cols = None
         self._current_tab_key = None
 
@@ -119,6 +120,8 @@ class MainWindow(tk.Tk):
         refs_menu = tk.Menu(menubar, tearoff=0)
         refs_menu.add_command(label="Мерчанты...", command=self._open_merchants_list)
         refs_menu.add_command(label="Терминалы...", command=self._open_terminals_list)
+        refs_menu.add_separator()
+        refs_menu.add_command(label="Настройки колонок...", command=self._open_column_settings)
         menubar.add_cascade(label="Справочники", menu=refs_menu)
 
         if self.user["role"] == "admin":
@@ -194,7 +197,6 @@ class MainWindow(tk.Tk):
         search_entry.bind("<Return>", lambda e: self._refresh_current_list())
         ttk.Button(search_row, text="Найти", command=self._refresh_current_list).pack(side="left")
         ttk.Button(search_row, text="Сброс", command=self._reset_search).pack(side="left", padx=4)
-        ttk.Button(search_row, text="Колонки...", command=self._open_column_settings).pack(side="right")
 
         self.filter_row = ttk.Frame(content)
         self.filter_row.pack(fill="x", pady=(0, 4))
@@ -227,10 +229,9 @@ class MainWindow(tk.Tk):
         self._refresh_current_list()
 
     # ------------------------------------------------------------------
-    # Колонки: применить/сохранить/настроить
+    # Колонки
     # ------------------------------------------------------------------
     def _apply_column_spec(self, tab_key):
-        """Применяет колонки текущей вкладки с учётом сохранённых настроек."""
         all_cols, headings, default_widths = _column_spec()[tab_key]
         settings = column_settings.load_settings()
         tab_settings = settings.get(tab_key, {})
@@ -240,22 +241,29 @@ class MainWindow(tk.Tk):
             visible = list(all_cols)
         widths = tab_settings.get("widths", {})
 
+        try:
+            self.tree.configure(displaycolumns="#all")
+        except Exception:
+            pass
+
         self.tree.configure(columns=all_cols, show="tree headings")
         self.tree.heading("#0", text="№ / S/N / ID")
-        # #0 ширина -- тоже сохраняется
         w0 = widths.get("#0", 340)
         self.tree.column("#0", width=w0, anchor="w")
         for c in all_cols:
             self.tree.heading(c, text=headings[c])
             w = widths.get(c, default_widths[c])
             self.tree.column(c, width=w, anchor="w")
-        self.tree.configure(displaycolumns=visible)
+
+        try:
+            self.tree.configure(displaycolumns=visible)
+        except Exception:
+            self.tree.configure(displaycolumns="#all")
 
         self._current_cols = all_cols
         self._current_tab_key = tab_key
 
     def _save_current_widths(self):
-        """Сохраняет ширины колонок текущей вкладки."""
         if not self._current_cols or not self._current_tab_key:
             return
         settings = column_settings.load_settings()
@@ -302,7 +310,6 @@ class MainWindow(tk.Tk):
     # Переключение вкладок
     # ------------------------------------------------------------------
     def _select_tab(self, tab):
-        # сохранить ширины предыдущей вкладки
         try:
             self._save_current_widths()
         except Exception:
@@ -461,6 +468,14 @@ class MainWindow(tk.Tk):
             for r in group_rows:
                 terminals.setdefault(r["terminal_id"], []).append(r)
 
+            # Сортировка терминалов по самой РАННЕЙ дате выдачи среди их ID.
+            def term_sort_key(item):
+                _, t_rows = item
+                dates = [_date_sort_key(r.get("issue_date")) for r in t_rows]
+                return min(dates) if dates else ""
+
+            terminals_sorted = sorted(terminals.items(), key=term_sort_key)
+
             type_node = self.tree.insert(
                 "", "end",
                 text=f"— {_type_label(t)} —   {len(terminals)} терм. / {len(group_rows)} ID",
@@ -470,7 +485,10 @@ class MainWindow(tk.Tk):
             )
             self._row_by_iid[type_node] = ("type_node", t, len(terminals), len(group_rows))
 
-            for term_id, term_rows in terminals.items():
+            for term_id, term_rows in terminals_sorted:
+                # ID внутри терминала -- по дате выдачи (по возрастанию)
+                term_rows.sort(key=lambda r: _date_sort_key(r.get("issue_date")))
+
                 term_num += 1
                 sn = term_rows[0]["serial_number"] or "(без S/N)"
                 model = term_rows[0]["model"] or "—"
@@ -480,7 +498,6 @@ class MainWindow(tk.Tk):
                 phone = _first_not_empty(term_rows, "phone")
                 own = OWNERSHIP_SHORT.get(term_rows[0]["ownership"], "")
 
-                # собираем значения по именам колонок
                 values_map = {"point": point, "address": address, "phone": phone,
                               "own": own, "owner": ""}
                 values = tuple(values_map.get(c, "") for c in self._current_cols)
@@ -698,6 +715,8 @@ class MainWindow(tk.Tk):
             ("Тип", _type_label(d["merchant_type"])),
             ("Транз/счёт", d["transit_account"]),
             ("Расчётный счёт", d["settlement_account"]),
+            ("Дата установки", d.get("install_date")),
+            ("Дата выдачи", d.get("issue_date")),
         ]
         actions = [
             ("Карточка терминала", lambda: self._open_terminal_card(d["terminal_id"])),

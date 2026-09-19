@@ -1,11 +1,11 @@
 {
   "active": {
     "widths": {
-      "#0": 426,
+      "#0": 427,
       "point": 345,
       "address": 275,
       "phone": 146,
-      "own": 94,
+      "own": 200,
       "owner": 285
     },
     "visible": [
@@ -15,5 +15,42 @@
       "phone",
       "own"
     ]
+  },
+  "epos": {
+    "widths": {
+      "#0": 340,
+      "point": 260,
+      "address": 190,
+      "phone": 120,
+      "own": 200,
+      "owner": 200
+    }
+  },
+  "warehouse": {
+    "widths": {
+      "#0": 374,
+      "num": 74,
+      "sn": 144,
+      "model": 144,
+      "own": 103,
+      "place": 123,
+      "condition": 133,
+      "moved_by": 163,
+      "moved_at": 163,
+      "comment": 194
+    }
+  },
+  "written_off": {
+    "widths": {
+      "#0": 340,
+      "num": 40,
+      "sn": 110,
+      "model": 110,
+      "own": 70,
+      "written_off_at": 120,
+      "reason": 180,
+      "comment": 160,
+      "approved_by": 130
+    }
   }
 }

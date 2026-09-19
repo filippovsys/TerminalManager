@@ -406,7 +406,7 @@ def find_by_serial(conn, serial_number):
     return dict(row) if row else None
 
 
-def list_all_terminals(conn, query=None, is_epos=None, limit=1000):
+def list_all_terminals(conn, query=None, is_epos=None, limit=2000):
     sql = """
         SELECT t.id, t.serial_number, t.model, t.ownership, t.is_epos, t.note,
                s.current_place, s.condition,
@@ -668,6 +668,7 @@ _ACTIVE_BASE_QUERY = """
         b.id AS binding_id, b.terminal_id, ti.id AS terminal_id_ref,
         ti.payment_id, ti.transit_account, ti.settlement_account,
         ti.owner_label, ti.point_label, ti.address, ti.phone,
+        ti.issue_date,
         m.id AS merchant_id, m.m_id, m.merchant_type,
         t.serial_number, t.model, t.ownership
     FROM terminal_id_bindings b
@@ -717,6 +718,7 @@ def get_terminal_id_detail(conn, binding_id):
             SELECT b.id AS binding_id, b.terminal_id, ti.id AS terminal_id_ref,
                    ti.payment_id, ti.transit_account, ti.settlement_account,
                    ti.owner_label, ti.point_label, ti.address, ti.phone,
+                   ti.install_date, ti.issue_date,
                    m.id AS merchant_id, m.m_id, m.merchant_type,
                    t.serial_number, t.model, t.ownership
             FROM terminal_id_bindings b
@@ -777,7 +779,6 @@ def get_active_dashboard_stats(conn):
         stats[f"terms_{row['merchant_type'] or 'unknown'}"] = row["c"]
         stats["total_terminals"] += row["c"]
     return stats
-
 
 
 def get_warehouse_terminals(conn, query=None, model=None, ownership=None, limit=2000):
