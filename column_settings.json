@@ -1,0 +1,19 @@
+{
+  "active": {
+    "widths": {
+      "#0": 426,
+      "point": 345,
+      "address": 275,
+      "phone": 146,
+      "own": 94,
+      "owner": 285
+    },
+    "visible": [
+      "point",
+      "owner",
+      "address",
+      "phone",
+      "own"
+    ]
+  }
+}

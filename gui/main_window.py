@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """Главное окно: вкладки под сводкой, дерево с группировкой
-Тип клиента -> Физ.терминал -> ID."""
+Тип клиента -> Физ.терминал -> ID. Колонки можно настраивать (порядок,
+видимость, ширины) -- см. кнопку "Колонки...".
+
+Настройки сохраняются в column_settings.json (через gui.column_settings).
+"""
 
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
@@ -8,6 +12,7 @@ from tkinter import ttk, messagebox, simpledialog
 import config
 import database
 from gui import utils
+from gui import column_settings
 from gui.terminal_card import TerminalCard
 from gui.merchant_card import MerchantCard
 from gui.users_window import UsersWindow
@@ -25,12 +30,45 @@ OWNERSHIP_DISPLAY = {"bank": "Банк", "client": "Клиент"}
 _PREFERRED_TYPE_ORDER = ("bank", "edara", "telekeci", "hk")
 
 
+# Описание колонок для каждой вкладки: {tab_key: (все_колонки, заголовки, ширины_по_умолчанию)}
+def _column_spec():
+    return {
+        "active": (
+            ("point", "address", "phone", "own", "owner"),
+            {"point": "Наименование организации", "address": "Адрес",
+             "phone": "Телефон", "own": "Собств.", "owner": "Ф.И. владельца"},
+            {"point": 260, "address": 190, "phone": 120, "own": 70, "owner": 200},
+        ),
+        "epos": (
+            ("point", "address", "phone", "own", "owner"),
+            {"point": "Наименование организации", "address": "Адрес",
+             "phone": "Телефон", "own": "Собств.", "owner": "Ф.И. владельца"},
+            {"point": 260, "address": 190, "phone": 120, "own": 70, "owner": 200},
+        ),
+        "warehouse": (
+            ("num", "sn", "model", "own", "place", "condition", "moved_by", "moved_at", "comment"),
+            {"num": "№", "sn": "S/N", "model": "Модель", "own": "Собств.",
+             "place": "Место", "condition": "Состояние",
+             "moved_by": "Кем перемещён", "moved_at": "Когда", "comment": "Комментарий"},
+            {"num": 40, "sn": 110, "model": 110, "own": 70, "place": 90,
+             "condition": 100, "moved_by": 130, "moved_at": 130, "comment": 160},
+        ),
+        "written_off": (
+            ("num", "sn", "model", "own", "written_off_at", "reason", "comment", "approved_by"),
+            {"num": "№", "sn": "S/N", "model": "Модель", "own": "Собств.",
+             "written_off_at": "Дата списания", "reason": "Причина",
+             "comment": "Комментарий", "approved_by": "Кто списал"},
+            {"num": 40, "sn": 110, "model": 110, "own": 70,
+             "written_off_at": 120, "reason": 180, "comment": 160, "approved_by": 130},
+        ),
+    }
+
+
 def _type_label(code):
     return TYPE_LABELS.get(code, (code or "?").upper())
 
 
 def _first_not_empty(rows, key):
-    """Первое непустое значение среди строк (для агрегации по терминалу)."""
     for r in rows:
         v = r.get(key)
         if v:
@@ -49,6 +87,10 @@ class MainWindow(tk.Tk):
         self.query_var = tk.StringVar()
         self._pending_restore = None
         self._row_by_iid = {}
+
+        # текущие применённые колонки для вкладки (для сохранения ширин)
+        self._current_cols = None
+        self._current_tab_key = None
 
         self.title(f"HalkTerminalManager v{config.APP_VERSION} -- {user['full_name']} ({user['role']})")
         self.geometry("1360x780")
@@ -121,7 +163,7 @@ class MainWindow(tk.Tk):
             ttk.Label(self.stats_frame, text=text).grid(row=i // 5, column=i % 5, sticky="w", padx=10, pady=2)
 
     # ------------------------------------------------------------------
-    # Вкладки (горизонтально под сводкой)
+    # Вкладки
     # ------------------------------------------------------------------
     def _build_tabs(self):
         self.tab_bar = ttk.Frame(self, padding=(10, 0))
@@ -152,6 +194,7 @@ class MainWindow(tk.Tk):
         search_entry.bind("<Return>", lambda e: self._refresh_current_list())
         ttk.Button(search_row, text="Найти", command=self._refresh_current_list).pack(side="left")
         ttk.Button(search_row, text="Сброс", command=self._reset_search).pack(side="left", padx=4)
+        ttk.Button(search_row, text="Колонки...", command=self._open_column_settings).pack(side="right")
 
         self.filter_row = ttk.Frame(content)
         self.filter_row.pack(fill="x", pady=(0, 4))
@@ -184,9 +227,87 @@ class MainWindow(tk.Tk):
         self._refresh_current_list()
 
     # ------------------------------------------------------------------
+    # Колонки: применить/сохранить/настроить
+    # ------------------------------------------------------------------
+    def _apply_column_spec(self, tab_key):
+        """Применяет колонки текущей вкладки с учётом сохранённых настроек."""
+        all_cols, headings, default_widths = _column_spec()[tab_key]
+        settings = column_settings.load_settings()
+        tab_settings = settings.get(tab_key, {})
+        visible = tab_settings.get("visible") or list(all_cols)
+        visible = [c for c in visible if c in all_cols]
+        if not visible:
+            visible = list(all_cols)
+        widths = tab_settings.get("widths", {})
+
+        self.tree.configure(columns=all_cols, show="tree headings")
+        self.tree.heading("#0", text="№ / S/N / ID")
+        # #0 ширина -- тоже сохраняется
+        w0 = widths.get("#0", 340)
+        self.tree.column("#0", width=w0, anchor="w")
+        for c in all_cols:
+            self.tree.heading(c, text=headings[c])
+            w = widths.get(c, default_widths[c])
+            self.tree.column(c, width=w, anchor="w")
+        self.tree.configure(displaycolumns=visible)
+
+        self._current_cols = all_cols
+        self._current_tab_key = tab_key
+
+    def _save_current_widths(self):
+        """Сохраняет ширины колонок текущей вкладки."""
+        if not self._current_cols or not self._current_tab_key:
+            return
+        settings = column_settings.load_settings()
+        tab_settings = settings.setdefault(self._current_tab_key, {})
+        widths = tab_settings.setdefault("widths", {})
+        try:
+            widths["#0"] = int(self.tree.column("#0", "width"))
+        except Exception:
+            pass
+        for c in self._current_cols:
+            try:
+                widths[c] = int(self.tree.column(c, "width"))
+            except Exception:
+                pass
+        column_settings.save_settings(settings)
+
+    def _open_column_settings(self):
+        tab_key = self.current_tab
+        if tab_key not in _column_spec():
+            messagebox.showinfo("Инфо", "Для этой вкладки настройка колонок недоступна", parent=self)
+            return
+        all_cols, headings, _ = _column_spec()[tab_key]
+        settings = column_settings.load_settings()
+        visible = settings.get(tab_key, {}).get("visible") or list(all_cols)
+        visible = [c for c in visible if c in all_cols] or list(all_cols)
+
+        def on_apply(new_visible):
+            s = column_settings.load_settings()
+            s.setdefault(tab_key, {})["visible"] = new_visible
+            column_settings.save_settings(s)
+            self._apply_column_spec(tab_key)
+
+        ColumnSettingsDialog = column_settings.ColumnSettingsDialog
+        ColumnSettingsDialog(self, all_cols, headings, visible, on_apply)
+
+    def destroy(self):
+        try:
+            self._save_current_widths()
+        except Exception:
+            pass
+        super().destroy()
+
+    # ------------------------------------------------------------------
     # Переключение вкладок
     # ------------------------------------------------------------------
     def _select_tab(self, tab):
+        # сохранить ширины предыдущей вкладки
+        try:
+            self._save_current_widths()
+        except Exception:
+            pass
+
         self.current_tab = tab
         for key, b in self.tab_buttons.items():
             b.configure(style="Selected.TButton" if key == tab else "TButton")
@@ -252,7 +373,7 @@ class MainWindow(tk.Tk):
         model, ownership = self._read_filters()
 
         if self.current_tab == "active":
-            self._configure_active_columns()
+            self._apply_column_spec("active")
             with database.get_connection() as conn:
                 rows = database.get_active_terminal_ids(
                     conn, merchant_type=self.filter_var.get() or None,
@@ -263,7 +384,7 @@ class MainWindow(tk.Tk):
             self._set_stats(self._format_active_stats(stats))
 
         elif self.current_tab == "warehouse":
-            self._configure_warehouse_columns()
+            self._apply_column_spec("warehouse")
             with database.get_connection() as conn:
                 rows = database.get_warehouse_terminals(conn, query=query, model=model, ownership=ownership)
                 stats = database.get_warehouse_dashboard_stats(conn)
@@ -275,7 +396,7 @@ class MainWindow(tk.Tk):
             ])
 
         elif self.current_tab == "written_off":
-            self._configure_written_off_columns()
+            self._apply_column_spec("written_off")
             with database.get_connection() as conn:
                 rows = database.get_written_off_terminals(conn, query=query, model=model, ownership=ownership)
                 stats = database.get_written_off_dashboard_stats(conn)
@@ -283,7 +404,7 @@ class MainWindow(tk.Tk):
             self._set_stats([f"Списано всего: {stats['total']}"])
 
         else:  # epos
-            self._configure_active_columns()
+            self._apply_column_spec("epos")
             with database.get_connection() as conn:
                 rows = database.get_epos_terminals(conn, query=query, model=model)
                 stats = database.get_epos_dashboard_stats(conn)
@@ -294,7 +415,6 @@ class MainWindow(tk.Tk):
         self._restore_selection_if_needed()
 
     def _format_active_stats(self, stats):
-        """Сводка: сколько терминалов и сколько ID по каждому типу."""
         lines = [f"Активных: {stats['total_terminals']} терм. / {stats['total']} ID"]
         for t in _PREFERRED_TYPE_ORDER:
             terms = stats.get(f"terms_{t}")
@@ -304,7 +424,6 @@ class MainWindow(tk.Tk):
             terms = terms or 0
             ids = ids or 0
             lines.append(f"{_type_label(t)}: {terms} терм. / {ids} ID")
-        # прочие типы
         other_types = set()
         for k in stats.keys():
             if k in ("total", "total_terminals"):
@@ -325,24 +444,6 @@ class MainWindow(tk.Tk):
     # ------------------------------------------------------------------
     # Вкладка "Активные" -- дерево: Тип -> Физ.терминал -> ID
     # ------------------------------------------------------------------
-    def _configure_active_columns(self):
-        cols = ("num", "point", "address", "phone", "own", "owner")
-        headings = {
-            "num": "№",
-            "point": "Наименование организации",
-            "address": "Адрес",
-            "phone": "Телефон",
-            "own": "Собств.",
-            "owner": "Ф.И. владельца",
-        }
-        widths = {"num": 45, "point": 260, "address": 190, "phone": 120, "own": 70, "owner": 200}
-        self.tree.configure(columns=cols, show="tree headings")
-        self.tree.heading("#0", text="Тип / Терминал / ID")
-        self.tree.column("#0", width=340, anchor="w")
-        for c in cols:
-            self.tree.heading(c, text=headings[c])
-            self.tree.column(c, width=widths[c], anchor="w")
-
     def _render_active_tree(self, rows):
         self.tree.delete(*self.tree.get_children())
         self._row_by_iid = {}
@@ -352,7 +453,7 @@ class MainWindow(tk.Tk):
         order = [t for t in _PREFERRED_TYPE_ORDER if t in groups]
         order += sorted(t for t in groups if t not in _PREFERRED_TYPE_ORDER)
 
-        term_num = 0  # сквозной счётчик терминалов (как SAN в Excel)
+        term_num = 0
 
         for t in order:
             group_rows = groups[t]
@@ -363,7 +464,7 @@ class MainWindow(tk.Tk):
             type_node = self.tree.insert(
                 "", "end",
                 text=f"— {_type_label(t)} —   {len(terminals)} терм. / {len(group_rows)} ID",
-                values=("", "", "", "", "", ""),
+                values=tuple([""] * len(self._current_cols)),
                 tags=("group",),
                 open=False,
             )
@@ -374,33 +475,38 @@ class MainWindow(tk.Tk):
                 sn = term_rows[0]["serial_number"] or "(без S/N)"
                 model = term_rows[0]["model"] or "—"
 
-                # Агрегируем наименование/адрес/телефон терминала (первое непустое)
                 point = _first_not_empty(term_rows, "point_label")
                 address = _first_not_empty(term_rows, "address")
                 phone = _first_not_empty(term_rows, "phone")
                 own = OWNERSHIP_SHORT.get(term_rows[0]["ownership"], "")
 
+                # собираем значения по именам колонок
+                values_map = {"point": point, "address": address, "phone": phone,
+                              "own": own, "owner": ""}
+                values = tuple(values_map.get(c, "") for c in self._current_cols)
+
                 term_node = self.tree.insert(
                     type_node, "end",
-                    text=f"S/N: {sn}  •  {model}  •  {len(term_rows)} ID",
-                    values=(term_num, point, address, phone, own, ""),
+                    text=f"{term_num}. S/N: {sn}  •  {model}  •  {len(term_rows)} ID",
+                    values=values,
                     tags=("terminal",),
                     open=False,
                 )
                 self._row_by_iid[term_node] = ("terminal_node", term_id)
 
                 for i, r in enumerate(term_rows, start=1):
+                    vmap = {
+                        "point": r["point_label"] or "",
+                        "address": r["address"] or "",
+                        "phone": r["phone"] or "",
+                        "own": OWNERSHIP_SHORT.get(r["ownership"], ""),
+                        "owner": r["owner_label"] or "",
+                    }
+                    v = tuple(vmap.get(c, "") for c in self._current_cols)
                     iid = self.tree.insert(
                         term_node, "end",
                         text=f"    {i}. {r['payment_id']}",
-                        values=(
-                            "",
-                            r["point_label"] or "",
-                            r["address"] or "",
-                            r["phone"] or "",
-                            OWNERSHIP_SHORT.get(r["ownership"], ""),
-                            r["owner_label"] or "",
-                        ),
+                        values=v,
                         tags=("item",),
                     )
                     self._row_by_iid[iid] = ("active", r["binding_id"])
@@ -417,7 +523,7 @@ class MainWindow(tk.Tk):
         order = [t for t in _PREFERRED_TYPE_ORDER if t in groups]
         order += sorted(t for t in groups if t not in _PREFERRED_TYPE_ORDER)
 
-        term_num = 0  # сквозной счётчик терминалов
+        term_num = 0
 
         for t in order:
             group_rows = groups[t]
@@ -428,7 +534,7 @@ class MainWindow(tk.Tk):
             type_node = self.tree.insert(
                 "", "end",
                 text=f"— {_type_label(t)} —   {len(terminals)} терм. / {len(group_rows)} ID",
-                values=("", "", "", "", "", ""),
+                values=tuple([""] * len(self._current_cols)),
                 tags=("group",),
                 open=False,
             )
@@ -442,27 +548,32 @@ class MainWindow(tk.Tk):
                 address = _first_not_empty(term_rows, "address")
                 phone = _first_not_empty(term_rows, "phone")
 
+                values_map = {"point": point, "address": address, "phone": phone,
+                              "own": own, "owner": ""}
+                values = tuple(values_map.get(c, "") for c in self._current_cols)
+
                 term_node = self.tree.insert(
                     type_node, "end",
-                    text=f"{model}  •  {own}  •  {len(term_rows)} ID",
-                    values=(term_num, point, address, phone, own, ""),
+                    text=f"{term_num}. {model}  •  {own}  •  {len(term_rows)} ID",
+                    values=values,
                     tags=("terminal",),
                     open=False,
                 )
                 self._row_by_iid[term_node] = ("terminal_node", term_id)
 
                 for r in term_rows:
+                    vmap = {
+                        "point": r["point_label"] or "",
+                        "address": r["address"] or "",
+                        "phone": r["phone"] or "",
+                        "own": "",
+                        "owner": r["owner_label"] or "",
+                    }
+                    v = tuple(vmap.get(c, "") for c in self._current_cols)
                     iid = self.tree.insert(
                         term_node, "end",
                         text=f"    {r['payment_id'] or '(без ID)'}",
-                        values=(
-                            "",
-                            r["point_label"] or "",
-                            r["address"] or "",
-                            r["phone"] or "",
-                            "",
-                            r["owner_label"] or "",
-                        ),
+                        values=v,
                         tags=("item",),
                     )
                     self._row_by_iid[iid] = ("epos", r["binding_id"], r["terminal_id"])
@@ -470,66 +581,38 @@ class MainWindow(tk.Tk):
     # ------------------------------------------------------------------
     # Вкладка "Склад"
     # ------------------------------------------------------------------
-    def _configure_warehouse_columns(self):
-        self.tree.configure(show="headings")
-        cols = ("num", "sn", "model", "own", "place", "condition", "moved_by", "moved_at", "comment")
-        headings = {
-            "num": "№", "sn": "S/N", "model": "Модель", "own": "Собств.",
-            "place": "Место", "condition": "Состояние",
-            "moved_by": "Кем перемещён", "moved_at": "Когда", "comment": "Комментарий",
-        }
-        widths = {"num": 40, "sn": 110, "model": 110, "own": 70, "place": 90, "condition": 100,
-                  "moved_by": 130, "moved_at": 130, "comment": 160}
-        self.tree.configure(columns=cols)
-        for c in cols:
-            self.tree.heading(c, text=headings[c])
-            self.tree.column(c, width=widths[c], anchor="w")
-
     def _render_warehouse_tree(self, rows):
         self.tree.delete(*self.tree.get_children())
         self._row_by_iid = {}
         for i, r in enumerate(rows, start=1):
             place_text = PLACE_LABELS.get(r["current_place"], r["current_place"])
-            iid = self.tree.insert(
-                "", "end",
-                values=(i, r["serial_number"] or "(без S/N)", r["model"] or "",
-                        OWNERSHIP_SHORT.get(r["ownership"], ""), place_text,
-                        CONDITION_LABELS.get(r["condition"], r["condition"]),
-                        r["moved_by_name"] or "", r["last_moved_at"] or "", r["last_comment"] or ""),
-                tags=("item",),
-            )
+            vmap = {
+                "num": i, "sn": r["serial_number"] or "(без S/N)", "model": r["model"] or "",
+                "own": OWNERSHIP_SHORT.get(r["ownership"], ""), "place": place_text,
+                "condition": CONDITION_LABELS.get(r["condition"], r["condition"]),
+                "moved_by": r["moved_by_name"] or "", "moved_at": r["last_moved_at"] or "",
+                "comment": r["last_comment"] or "",
+            }
+            v = tuple(vmap.get(c, "") for c in self._current_cols)
+            iid = self.tree.insert("", "end", text="", values=v, tags=("item",))
             self._row_by_iid[iid] = ("warehouse", r["terminal_id"], r)
 
     # ------------------------------------------------------------------
     # Вкладка "Списанные"
     # ------------------------------------------------------------------
-    def _configure_written_off_columns(self):
-        self.tree.configure(show="headings")
-        cols = ("num", "sn", "model", "own", "written_off_at", "reason", "comment", "approved_by")
-        headings = {
-            "num": "№", "sn": "S/N", "model": "Модель", "own": "Собств.",
-            "written_off_at": "Дата списания", "reason": "Причина",
-            "comment": "Комментарий", "approved_by": "Кто списал",
-        }
-        widths = {"num": 40, "sn": 110, "model": 110, "own": 70,
-                  "written_off_at": 120, "reason": 180, "comment": 160, "approved_by": 130}
-        self.tree.configure(columns=cols)
-        for c in cols:
-            self.tree.heading(c, text=headings[c])
-            self.tree.column(c, width=widths[c], anchor="w")
-
     def _render_written_off_tree(self, rows):
         self.tree.delete(*self.tree.get_children())
         self._row_by_iid = {}
         for i, r in enumerate(rows, start=1):
-            iid = self.tree.insert(
-                "", "end",
-                values=(i, r["serial_number"] or "(без S/N)", r["model"] or "",
-                        OWNERSHIP_SHORT.get(r["ownership"], ""),
-                        r["written_off_at"] or "", r["reason"] or "",
-                        r["comment"] or "", r["approved_by_name"] or ""),
-                tags=("item",),
-            )
+            vmap = {
+                "num": i, "sn": r["serial_number"] or "(без S/N)", "model": r["model"] or "",
+                "own": OWNERSHIP_SHORT.get(r["ownership"], ""),
+                "written_off_at": r["written_off_at"] or "",
+                "reason": r["reason"] or "", "comment": r["comment"] or "",
+                "approved_by": r["approved_by_name"] or "",
+            }
+            v = tuple(vmap.get(c, "") for c in self._current_cols)
+            iid = self.tree.insert("", "end", text="", values=v, tags=("item",))
             self._row_by_iid[iid] = ("written_off", r["terminal_id"], r)
 
     # ------------------------------------------------------------------
