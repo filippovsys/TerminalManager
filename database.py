@@ -4,26 +4,13 @@ database.py -- слой доступа к данным HalkTerminalManager.
 
 Все функции (кроме get_connection/init_db) принимают уже открытое
 соединение `conn` первым аргументом -- это позволяет GUI объединять
-несколько операций в одну транзакцию там, где это нужно (например,
-"переместить терминал" + "закрыть привязку ID" одним коммитом).
-
-Типичное использование из GUI:
-
-    import database
-
-    with database.get_connection() as conn:
-        results = database.search_terminals(conn, "CT2506")
-
-    with database.get_connection() as conn:
-        user = database.authenticate(conn, login, password)
-
-get_connection() сам делает commit() при успешном выходе из `with`
-и rollback() при исключении -- отдельно вызывать conn.commit() не нужно.
+несколько операций в одну транзакцию.
 """
 
 import binascii
 import hashlib
 import os
+import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
@@ -48,7 +35,6 @@ def get_connection():
 
 
 def sqlite3_connect():
-    import sqlite3
     conn = sqlite3.connect(config.DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -56,7 +42,6 @@ def sqlite3_connect():
 
 
 def init_db():
-    """Создаёт БД по схеме, если файла ещё нет. Существующую БД не трогает."""
     os.makedirs(os.path.dirname(config.DB_PATH) or ".", exist_ok=True)
     is_new = not os.path.exists(config.DB_PATH)
     if is_new:
@@ -66,11 +51,6 @@ def init_db():
     return is_new
 
 
-# Колонки, добавленные в схему уже ПОСЛЕ первого запуска у пользователя --
-# чтобы не заставлять пересоздавать/переимпортировать существующую БД
-# при обновлении программы. Добавлять сюда новую запись при каждом
-# ALTER TABLE в будущем; ensure_schema_upgrades() идемпотентна -- безопасно
-# вызывать при каждом запуске.
 _SCHEMA_UPGRADES = {
     "terminal_ids": {
         "address": "TEXT",
@@ -83,9 +63,6 @@ _SCHEMA_UPGRADES = {
 
 
 def ensure_schema_upgrades(conn):
-    """Добавляет отсутствующие колонки (см. _SCHEMA_UPGRADES) в уже
-    существующую БД. Ничего не делает, если колонка уже есть, поэтому
-    безопасно вызывать при каждом запуске программы."""
     for table, columns in _SCHEMA_UPGRADES.items():
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
         for col_name, col_type in columns.items():
@@ -106,9 +83,6 @@ def _table_exists(conn, table_name):
 
 
 def log_app_version_if_new(conn, notes=None):
-    """Пишет текущую config.APP_VERSION в app_version_log, если такой
-    версии там ещё нет. Вызывается один раз при старте программы --
-    так история версий ведётся автоматически, без ручного журнала."""
     exists = conn.execute(
         "SELECT 1 FROM app_version_log WHERE version = ?", (config.APP_VERSION,)
     ).fetchone()
@@ -128,7 +102,7 @@ def get_version_history(conn, limit=50):
 
 
 # =============================================================================
-# Пароли (без внешних библиотек)
+# Пароли
 # =============================================================================
 
 def hash_password(password, salt=None):
@@ -148,7 +122,7 @@ def verify_password(password, stored_hash):
 
 
 # =============================================================================
-# Пользователи и аутентификация
+# Пользователи
 # =============================================================================
 
 def create_user(conn, username, password, full_name, role):
@@ -161,7 +135,6 @@ def create_user(conn, username, password, full_name, role):
 
 
 def authenticate(conn, username, password):
-    """Возвращает dict пользователя при успехе, иначе None."""
     row = conn.execute(
         "SELECT * FROM users WHERE username = ? AND is_active = 1", (username,)
     ).fetchone()
@@ -184,7 +157,6 @@ def _require_admin(admin_user):
 
 
 def create_user_checked(conn, admin_user, username, password, full_name, role):
-    """Как create_user, но с проверкой прав и понятной ошибкой при дубле логина."""
     _require_admin(admin_user)
     existing = conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone()
     if existing is not None:
@@ -193,7 +165,6 @@ def create_user_checked(conn, admin_user, username, password, full_name, role):
 
 
 def update_user(conn, admin_user, user_id, **fields):
-    """fields: full_name, role. Логин и статус архивации меняются отдельными функциями."""
     _require_admin(admin_user)
     allowed = {"full_name", "role"}
     changes = {k: v for k, v in fields.items() if k in allowed and v is not None}
@@ -214,8 +185,6 @@ def change_user_password(conn, admin_user, user_id, new_password):
 
 
 def change_own_password(conn, user, old_password, new_password):
-    """Пользователь сам меняет свой пароль (не требует роли admin), но
-    должен подтвердить текущий пароль."""
     row = conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
     if row is None or not verify_password(old_password, row["password_hash"]):
         raise ValueError("Текущий пароль указан неверно")
@@ -226,13 +195,10 @@ def change_own_password(conn, user, old_password, new_password):
 
 
 def archive_user(conn, admin_user, user_id):
-    """'Удаление' пользователя -- на самом деле архивация (is_active = 0),
-    без физического удаления, чтобы не потерять ссылки в audit_log/истории."""
     _require_admin(admin_user)
     if user_id == admin_user["id"]:
         raise ValueError("Нельзя архивировать самого себя, пока вы в системе под этим пользователем")
     conn.execute("UPDATE users SET is_active = 0 WHERE id = ?", (user_id,))
-    # На всякий случай снимаем все блокировки карточек, которые держал архивируемый пользователь
     conn.execute("DELETE FROM edit_locks WHERE locked_by = ?", (user_id,))
 
 
@@ -242,16 +208,10 @@ def restore_user(conn, admin_user, user_id):
 
 
 # =============================================================================
-# Блокировка карточек на редактирование ("занято пользователем Х")
+# Блокировка карточек
 # =============================================================================
 
 def acquire_lock(conn, entity_type, entity_id, user_id):
-    """Пытается захватить карточку на редактирование.
-    Возвращает (True, None) при успехе.
-    Возвращает (False, lock_info) если занято другим активным пользователем;
-    lock_info -- dict с полями locked_by, locked_by_name, locked_at.
-    Зависшие блокировки (старше EDIT_LOCK_TIMEOUT_MINUTES) снимаются автоматически.
-    """
     row = conn.execute(
         "SELECT l.locked_by, l.locked_at, u.full_name AS locked_by_name "
         "FROM edit_locks l LEFT JOIN users u ON u.id = l.locked_by "
@@ -294,7 +254,7 @@ def get_lock(conn, entity_type, entity_id):
 
 
 # =============================================================================
-# Аудит: журнал изменений отдельных полей
+# Аудит
 # =============================================================================
 
 def log_change(conn, user_id, entity_type, entity_id, field_name, old_value, new_value):
@@ -312,10 +272,6 @@ def log_change(conn, user_id, entity_type, entity_id, field_name, old_value, new
 
 
 def update_row_with_audit(conn, table, entity_type, row_id, user_id, changes):
-    """changes: {имя_колонки: новое_значение}.
-    ВАЖНО: ключи changes должны быть только захардкоженными в коде именами
-    колонок (см. вызовы ниже) -- никогда не передавать сюда текст,
-    введённый пользователем как имя поля (SQL-инъекция через имя колонки)."""
     if not changes:
         return
     old_row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (row_id,)).fetchone()
@@ -362,6 +318,23 @@ def search_merchants(conn, query, limit=200):
         (q, q, q, limit),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def list_all_merchants(conn, query=None, limit=1000):
+    sql = """
+        SELECT m.id, m.m_id, m.merchant_type, m.note, m.created_at,
+               (SELECT COUNT(*) FROM terminal_ids ti WHERE ti.merchant_id = m.id) AS ids_count
+        FROM merchants m
+        WHERE 1=1
+    """
+    params = []
+    if query:
+        q = f"%{query}%"
+        sql += " AND (m.m_id LIKE ? OR m.note LIKE ?)"
+        params += [q, q]
+    sql += " ORDER BY m.merchant_type, m.m_id LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
 def get_merchant(conn, merchant_id):
@@ -433,6 +406,29 @@ def find_by_serial(conn, serial_number):
     return dict(row) if row else None
 
 
+def list_all_terminals(conn, query=None, is_epos=None, limit=1000):
+    sql = """
+        SELECT t.id, t.serial_number, t.model, t.ownership, t.is_epos, t.note,
+               s.current_place, s.condition,
+               (SELECT COUNT(*) FROM terminal_id_bindings b
+                WHERE b.terminal_id = t.id AND b.bound_to IS NULL) AS active_ids
+        FROM terminals t
+        JOIN terminal_current_state s ON s.terminal_id = t.id
+        WHERE 1=1
+    """
+    params = []
+    if is_epos is not None:
+        sql += " AND t.is_epos = ?"
+        params.append(1 if is_epos else 0)
+    if query:
+        q = f"%{query}%"
+        sql += " AND (t.serial_number LIKE ? OR t.model LIKE ?)"
+        params += [q, q]
+    sql += " ORDER BY t.serial_number LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
 def search_terminals(conn, query, limit=200):
     q = f"%{query}%"
     rows = conn.execute(
@@ -457,8 +453,6 @@ def search_terminals(conn, query, limit=200):
 
 
 def get_terminal_full(conn, terminal_id):
-    """Полная карточка терминала: сам терминал + текущее состояние +
-    вся история (подключение, перемещения, привязки ID, ремонты, списание)."""
     terminal = conn.execute("SELECT * FROM terminals WHERE id = ?", (terminal_id,)).fetchone()
     if terminal is None:
         return None
@@ -506,15 +500,21 @@ def get_terminal_full(conn, terminal_id):
     }
 
 
-def create_terminal(conn, serial_number, model, ownership, connection_type, user_id, note=None):
+def create_terminal(conn, serial_number, model, ownership, connection_type, user_id,
+                    note=None, is_epos=0):
     if serial_number and find_by_serial(conn, serial_number):
         raise ValueError(f"Терминал с S/N {serial_number} уже существует")
     cur = conn.execute(
-        "INSERT INTO terminals (serial_number, model, ownership, connection_type, note) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (serial_number, model, ownership, connection_type, note),
+        "INSERT INTO terminals (serial_number, model, ownership, connection_type, note, is_epos) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (serial_number, model, ownership, connection_type, note, 1 if is_epos else 0),
     )
     terminal_id = cur.lastrowid
+    conn.execute(
+        "INSERT INTO terminal_placements (terminal_id, place_type, comment, changed_by) "
+        "VALUES (?, 'warehouse', 'создан в справочнике', ?)",
+        (terminal_id, user_id),
+    )
     log_change(conn, user_id, "terminal", terminal_id, "created", None, serial_number)
     return terminal_id
 
@@ -526,7 +526,6 @@ def update_terminal(conn, terminal_id, user_id, **fields):
 
 
 def change_connection(conn, terminal_id, sim_number, ip_address, user_id):
-    """Закрывает текущую запись подключения и открывает новую -- сохраняя историю."""
     conn.execute(
         "UPDATE connection_history SET valid_to = datetime('now') "
         "WHERE terminal_id = ? AND valid_to IS NULL",
@@ -542,8 +541,6 @@ def change_connection(conn, terminal_id, sim_number, ip_address, user_id):
 
 
 def move_terminal(conn, terminal_id, place_type, user_id, merchant_id=None, comment=None):
-    """Перемещает терминал: у мерчанта / склад / мастерская.
-    Место -- отдельная ось от состояния ремонта/списания (см. схему)."""
     if place_type not in ("merchant", "warehouse", "repair_shop"):
         raise ValueError("place_type должен быть merchant/warehouse/repair_shop")
     if place_type == "merchant" and merchant_id is None:
@@ -556,7 +553,7 @@ def move_terminal(conn, terminal_id, place_type, user_id, merchant_id=None, comm
 
 
 # =============================================================================
-# Платёжные ID и их привязка к физическим терминалам
+# Платёжные ID и привязки
 # =============================================================================
 
 def create_terminal_id(conn, payment_id, transit_account, merchant_id, owner_label, point_label):
@@ -584,12 +581,6 @@ def unbind_terminal_id(conn, binding_id, user_id):
 
 
 def close_terminal_id(conn, binding_id, user_id, comment=None):
-    """Действие "Закрыть" на активной вкладке главного окна: отвязывает
-    один платёжный ID от терминала. Если у терминала после этого не
-    осталось ни одной активной привязки -- терминал автоматически
-    перемещается на склад (см. move_terminal), с комментарием и
-    отметкой, кто и когда это сделал (terminal_placements.changed_by/moved_at).
-    Возвращает True, если терминал в результате уехал на склад."""
     row = conn.execute(
         "SELECT terminal_id FROM terminal_id_bindings WHERE id = ? AND bound_to IS NULL",
         (binding_id,),
@@ -637,8 +628,6 @@ def update_repair(conn, repair_id, user_id, **fields):
 
 
 def write_off_terminal(conn, terminal_id, reason, user, comment=None):
-    """Списание -- необратимое действие, разрешено только пользователю с role='admin'.
-    user -- dict, как возвращает authenticate()."""
     if user.get("role") != "admin":
         raise PermissionError("Списывать терминалы может только администратор")
     conn.execute(
@@ -648,7 +637,7 @@ def write_off_terminal(conn, terminal_id, reason, user, comment=None):
 
 
 # =============================================================================
-# Сводная статистика для главного экрана
+# Сводная статистика
 # =============================================================================
 
 def get_dashboard_stats(conn):
@@ -671,11 +660,8 @@ def get_dashboard_stats(conn):
 
 
 # =============================================================================
-# Представления для главного окна: вкладки "Активные" / "Склад" / "E-POS"
+# Вкладки главного окна
 # =============================================================================
-# Один физический терминал может иметь несколько активных платёжных ID --
-# на вкладке "Активные" (как раньше в Excel) строка -- это один активный
-# ID, а не один физический терминал; группировка в дереве -- по merchant_type.
 
 _ACTIVE_BASE_QUERY = """
     SELECT
@@ -683,7 +669,7 @@ _ACTIVE_BASE_QUERY = """
         ti.payment_id, ti.transit_account, ti.settlement_account,
         ti.owner_label, ti.point_label, ti.address, ti.phone,
         m.id AS merchant_id, m.m_id, m.merchant_type,
-        t.serial_number, t.model
+        t.serial_number, t.model, t.ownership
     FROM terminal_id_bindings b
     JOIN terminal_ids ti ON ti.id = b.terminal_id_ref
     JOIN merchants m ON m.id = ti.merchant_id
@@ -696,15 +682,18 @@ _ACTIVE_BASE_QUERY = """
 """
 
 
-def get_active_terminal_ids(conn, merchant_type=None, query=None, limit=2000):
-    """Список для вкладки "Активные": один активный платёжный ID = одна строка,
-    как раньше выглядело в Excel. merchant_type -- фильтр 'bank'/'edara'/'telekeci'/...,
-    None = все типы."""
+def get_active_terminal_ids(conn, merchant_type=None, query=None, model=None, ownership=None, limit=3000):
     sql = _ACTIVE_BASE_QUERY
     params = []
     if merchant_type:
         sql += " AND m.merchant_type = ?"
         params.append(merchant_type)
+    if model:
+        sql += " AND t.model = ?"
+        params.append(model)
+    if ownership:
+        sql += " AND t.ownership = ?"
+        params.append(ownership)
     if query:
         q = f"%{query}%"
         sql += (
@@ -718,20 +707,18 @@ def get_active_terminal_ids(conn, merchant_type=None, query=None, limit=2000):
 
 
 def get_terminal_id_detail(conn, binding_id):
-    """Детали для правой панели при выборе строки на вкладке "Активные"."""
     row = conn.execute(
         _ACTIVE_BASE_QUERY.replace("WHERE b.bound_to IS NULL", "WHERE b.id = ?"),
         (binding_id,),
     ).fetchone()
     if row is None:
-        # привязка могла быть уже закрыта -- ищем без ограничения по текущему состоянию
         row = conn.execute(
             """
             SELECT b.id AS binding_id, b.terminal_id, ti.id AS terminal_id_ref,
                    ti.payment_id, ti.transit_account, ti.settlement_account,
                    ti.owner_label, ti.point_label, ti.address, ti.phone,
                    m.id AS merchant_id, m.m_id, m.merchant_type,
-                   t.serial_number, t.model
+                   t.serial_number, t.model, t.ownership
             FROM terminal_id_bindings b
             JOIN terminal_ids ti ON ti.id = b.terminal_id_ref
             JOIN merchants m ON m.id = ti.merchant_id
@@ -754,9 +741,9 @@ def get_terminal_id_detail(conn, binding_id):
 
 
 def get_active_dashboard_stats(conn):
-    """Сводка для вкладки "Активные" -- считает только то, что реально
-    показано в списке (активно у мерчанта, не списано, не E-POS)."""
-    rows = conn.execute(
+    """Сводка по вкладке "Активные": сколько ID и сколько уникальных
+    физических терминалов по каждому типу клиента."""
+    rows_ids = conn.execute(
         """
         SELECT m.merchant_type, COUNT(*) c
         FROM terminal_id_bindings b
@@ -769,17 +756,31 @@ def get_active_dashboard_stats(conn):
         GROUP BY m.merchant_type
         """
     ).fetchall()
-    stats = {"total": 0}
-    for row in rows:
+    rows_terms = conn.execute(
+        """
+        SELECT m.merchant_type, COUNT(DISTINCT b.terminal_id) c
+        FROM terminal_id_bindings b
+        JOIN terminal_ids ti ON ti.id = b.terminal_id_ref
+        JOIN merchants m ON m.id = ti.merchant_id
+        JOIN terminals t ON t.id = b.terminal_id
+        JOIN terminal_current_state s ON s.terminal_id = b.terminal_id
+        WHERE b.bound_to IS NULL AND t.is_epos = 0
+          AND s.current_place = 'merchant' AND s.condition != 'written_off'
+        GROUP BY m.merchant_type
+        """
+    ).fetchall()
+    stats = {"total": 0, "total_terminals": 0}
+    for row in rows_ids:
         stats[row["merchant_type"] or "unknown"] = row["c"]
         stats["total"] += row["c"]
+    for row in rows_terms:
+        stats[f"terms_{row['merchant_type'] or 'unknown'}"] = row["c"]
+        stats["total_terminals"] += row["c"]
     return stats
 
 
-def get_warehouse_terminals(conn, query=None, limit=2000):
-    """Список для вкладки "Склад": физические терминалы, которые сейчас
-    НЕ у мерчанта (склад/мастерская) либо списаны. Показывает, кто и когда
-    последний раз переместил терминал (terminal_placements)."""
+
+def get_warehouse_terminals(conn, query=None, model=None, ownership=None, limit=2000):
     sql = """
         SELECT t.id AS terminal_id, t.serial_number, t.model, t.ownership,
                s.current_place, s.condition,
@@ -793,45 +794,79 @@ def get_warehouse_terminals(conn, query=None, limit=2000):
         LEFT JOIN terminal_placements lp ON lp.id = lpm.last_id
         LEFT JOIN users u ON u.id = lp.changed_by
         WHERE t.is_epos = 0
-          AND (s.current_place != 'merchant' OR s.condition = 'written_off')
+          AND s.condition != 'written_off'
+          AND s.current_place IN ('warehouse', 'repair_shop')
     """
     params = []
+    if model:
+        sql += " AND t.model = ?"; params.append(model)
+    if ownership:
+        sql += " AND t.ownership = ?"; params.append(ownership)
     if query:
         q = f"%{query}%"
         sql += " AND (t.serial_number LIKE ? OR t.model LIKE ?)"
         params += [q, q]
-    sql += " ORDER BY (s.condition = 'written_off'), lp.moved_at DESC LIMIT ?"
+    sql += " ORDER BY lp.moved_at DESC LIMIT ?"
     params.append(limit)
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
 def get_warehouse_dashboard_stats(conn):
-    stats = {"warehouse": 0, "repair_shop": 0, "written_off": 0, "total": 0}
+    stats = {"warehouse": 0, "repair_shop": 0, "total": 0}
     rows = conn.execute(
         """
-        SELECT s.current_place, s.condition, COUNT(*) c
+        SELECT s.current_place, COUNT(*) c
         FROM terminal_current_state s
         JOIN terminals t ON t.id = s.terminal_id
-        WHERE t.is_epos = 0 AND (s.current_place != 'merchant' OR s.condition = 'written_off')
-        GROUP BY s.current_place, s.condition
+        WHERE t.is_epos = 0 AND s.condition != 'written_off'
+          AND s.current_place IN ('warehouse', 'repair_shop')
+        GROUP BY s.current_place
         """
     ).fetchall()
     for row in rows:
-        if row["condition"] == "written_off":
-            stats["written_off"] += row["c"]
-        elif row["current_place"] in ("warehouse", "repair_shop"):
-            stats[row["current_place"]] += row["c"]
+        stats[row["current_place"]] += row["c"]
         stats["total"] += row["c"]
     return stats
 
 
-def get_epos_terminals(conn, query=None, limit=2000):
-    """Список для вкладки "E-POS": терминалы с is_epos = 1, вместе с их
-    активными платёжными ID (если есть)."""
+def get_written_off_terminals(conn, query=None, model=None, ownership=None, limit=2000):
     sql = """
-        SELECT t.id AS terminal_id, t.model, t.note,
+        SELECT t.id AS terminal_id, t.serial_number, t.model, t.ownership,
+               s.current_place, s.condition,
+               w.written_off_at, w.reason, w.comment,
+               u.full_name AS approved_by_name
+        FROM terminals t
+        JOIN terminal_current_state s ON s.terminal_id = t.id
+        LEFT JOIN terminal_writeoffs w ON w.terminal_id = t.id
+        LEFT JOIN users u ON u.id = w.approved_by
+        WHERE s.condition = 'written_off'
+    """
+    params = []
+    if model:
+        sql += " AND t.model = ?"; params.append(model)
+    if ownership:
+        sql += " AND t.ownership = ?"; params.append(ownership)
+    if query:
+        q = f"%{query}%"
+        sql += " AND (t.serial_number LIKE ? OR t.model LIKE ?)"
+        params += [q, q]
+    sql += " ORDER BY w.written_off_at DESC LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def get_written_off_dashboard_stats(conn):
+    total = conn.execute(
+        "SELECT COUNT(*) c FROM terminal_current_state WHERE condition = 'written_off'"
+    ).fetchone()["c"]
+    return {"total": total}
+
+
+def get_epos_terminals(conn, query=None, model=None, limit=2000):
+    sql = """
+        SELECT t.id AS terminal_id, t.model, t.ownership, t.note,
                b.id AS binding_id, ti.payment_id, ti.owner_label, ti.point_label,
-               ti.address, ti.phone, m.m_id, m.merchant_type
+               ti.address, ti.phone, m.id AS merchant_id, m.m_id, m.merchant_type
         FROM terminals t
         LEFT JOIN terminal_id_bindings b ON b.terminal_id = t.id AND b.bound_to IS NULL
         LEFT JOIN terminal_ids ti ON ti.id = b.terminal_id_ref
@@ -839,6 +874,8 @@ def get_epos_terminals(conn, query=None, limit=2000):
         WHERE t.is_epos = 1
     """
     params = []
+    if model:
+        sql += " AND t.model = ?"; params.append(model)
     if query:
         q = f"%{query}%"
         sql += " AND (ti.payment_id LIKE ? OR ti.owner_label LIKE ? OR ti.point_label LIKE ? OR m.m_id LIKE ?)"
@@ -851,3 +888,15 @@ def get_epos_terminals(conn, query=None, limit=2000):
 def get_epos_dashboard_stats(conn):
     total = conn.execute("SELECT COUNT(*) c FROM terminals WHERE is_epos = 1").fetchone()["c"]
     return {"total": total}
+
+
+def get_distinct_models(conn):
+    rows = conn.execute(
+        "SELECT DISTINCT model FROM terminals WHERE model IS NOT NULL AND model != '' ORDER BY model"
+    ).fetchall()
+    return [r["model"] for r in rows]
+
+
+def get_distinct_ownerships(conn):
+    rows = conn.execute("SELECT DISTINCT ownership FROM terminals ORDER BY ownership").fetchall()
+    return [r["ownership"] for r in rows]

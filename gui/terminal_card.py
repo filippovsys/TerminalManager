@@ -1,11 +1,48 @@
 # -*- coding: utf-8 -*-
-"""Карточка физического терминала: просмотр + редактирование (с блокировкой)."""
+"""Карточка физического терминала."""
 
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 
 import database
 from gui import utils
+
+
+PLACE_LABELS = {"merchant": "У клиента", "warehouse": "Склад", "repair_shop": "Мастерская"}
+
+
+class MoveDialog(tk.Toplevel):
+    """Диалог перемещения: только кнопки."""
+
+    def __init__(self, master, current_place):
+        super().__init__(master)
+        self.title("Переместить терминал")
+        self.resizable(False, False)
+        self.result = None
+
+        ttk.Label(
+            self, text=f"Текущее место: {PLACE_LABELS.get(current_place, current_place)}",
+            font=("TkDefaultFont", 10, "bold"),
+        ).pack(padx=20, pady=(15, 10))
+
+        btns = ttk.Frame(self, padding=10)
+        btns.pack()
+        ttk.Button(btns, text="К мерчанту", width=15,
+                   command=lambda: self._pick("merchant")).pack(side="left", padx=4)
+        ttk.Button(btns, text="На склад", width=15,
+                   command=lambda: self._pick("warehouse")).pack(side="left", padx=4)
+        ttk.Button(btns, text="В мастерскую", width=15,
+                   command=lambda: self._pick("repair_shop")).pack(side="left", padx=4)
+
+        ttk.Button(self, text="Отмена", command=self.destroy).pack(pady=(0, 12))
+
+        self.transient(master)
+        self.grab_set()
+        self.wait_window(self)
+
+    def _pick(self, place):
+        self.result = place
+        self.destroy()
 
 
 class TerminalCard(tk.Toplevel):
@@ -17,7 +54,7 @@ class TerminalCard(tk.Toplevel):
         self.read_only = False
 
         self.title("Терминал")
-        self.geometry("640x560")
+        self.geometry("760x620")
 
         with database.get_connection() as conn:
             ok, lock_info = database.acquire_lock(conn, "terminal", terminal_id, user["id"])
@@ -35,7 +72,6 @@ class TerminalCard(tk.Toplevel):
         utils.apply_to_all_entries(self)
         self._load()
 
-    # ------------------------------------------------------------------
     def _build(self):
         top = ttk.Frame(self, padding=10)
         top.pack(fill="x")
@@ -77,8 +113,9 @@ class TerminalCard(tk.Toplevel):
         notebook = ttk.Notebook(self)
         notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
+        # --- "Активные ID" ---
         ids_frame = ttk.Frame(notebook)
-        notebook.add(ids_frame, text="Привязанные ID")
+        notebook.add(ids_frame, text="Активные ID")
         ids_cols = ("payment_id", "transit_account", "settlement_account", "m_id",
                     "owner_label", "point_label", "address", "phone")
         ids_headings = {
@@ -94,8 +131,21 @@ class TerminalCard(tk.Toplevel):
         self._binding_ids_by_iid = {}
         self.close_id_btn = ttk.Button(ids_frame, text="Закрыть выбранный ID", command=self._close_selected_id)
         self.close_id_btn.pack(anchor="w", pady=(4, 0))
-        if self.user["role"] not in ("admin", "user"):
-            self.close_id_btn.state(["disabled"])
+
+        # --- "SN история" ---
+        hist_frame = ttk.Frame(notebook)
+        notebook.add(hist_frame, text="SN история")
+        hist_cols = ("payment_id", "owner_label", "point_label", "m_id", "bound_from", "bound_to")
+        hist_headings = {
+            "payment_id": "ID", "owner_label": "ФИО/плательщик", "point_label": "Точка/назначение",
+            "m_id": "M/id", "bound_from": "Привязан с", "bound_to": "Отвязан",
+        }
+        self.history_tree = ttk.Treeview(hist_frame, columns=hist_cols, show="headings", height=10)
+        for c in hist_cols:
+            self.history_tree.heading(c, text=hist_headings[c])
+            self.history_tree.column(c, width=120, anchor="w")
+        self.history_tree.pack(fill="both", expand=True)
+
         self.conn_tree = self._make_tab(notebook, "SIM/IP история",
                                          ("sim_number", "ip_address", "valid_from", "valid_to"),
                                          {"sim_number": "SIM", "ip_address": "IP",
@@ -117,6 +167,7 @@ class TerminalCard(tk.Toplevel):
                     child.state(["disabled"])
             for b in btns.winfo_children():
                 b.state(["disabled"])
+            self.close_id_btn.state(["disabled"])
 
     def _make_tab(self, notebook, title, cols, headings):
         frame = ttk.Frame(notebook)
@@ -128,7 +179,6 @@ class TerminalCard(tk.Toplevel):
         tree.pack(fill="both", expand=True)
         return tree
 
-    # ------------------------------------------------------------------
     def _load(self):
         with database.get_connection() as conn:
             data = database.get_terminal_full(conn, self.terminal_id)
@@ -143,19 +193,32 @@ class TerminalCard(tk.Toplevel):
         self.ownership_var.set(t["ownership"])
         self.note_var.set(t["note"] or "")
         self.state_label.config(
-            text=f"Место: {data['current_place']}   Состояние: {data['condition']}"
+            text=f"Место: {PLACE_LABELS.get(data['current_place'], data['current_place'])}   "
+                 f"Состояние: {data['condition']}"
         )
 
+        # Активные ID
         self.ids_tree.delete(*self.ids_tree.get_children())
         self._binding_ids_by_iid.clear()
         for b in data["bindings"]:
-            active = " (активна)" if not b["bound_to"] else " (закрыта)"
+            if b["bound_to"] is not None:
+                continue
             iid = self.ids_tree.insert("", "end", values=(
                 b["payment_id"], b["transit_account"] or "", b["settlement_account"] or "",
-                b["m_id"] or "", (b["owner_label"] or "") + active, b["point_label"] or "",
+                b["m_id"] or "", b["owner_label"] or "", b["point_label"] or "",
                 b["address"] or "", b["phone"] or "",
             ))
             self._binding_ids_by_iid[iid] = (b["id"], b["bound_to"])
+
+        # SN история (закрытые привязки)
+        self.history_tree.delete(*self.history_tree.get_children())
+        for b in data["bindings"]:
+            if b["bound_to"] is None:
+                continue
+            self.history_tree.insert("", "end", values=(
+                b["payment_id"], b["owner_label"] or "", b["point_label"] or "",
+                b["m_id"] or "", b["bound_from"], b["bound_to"],
+            ))
 
         self.conn_tree.delete(*self.conn_tree.get_children())
         for c in data["connections"]:
@@ -166,7 +229,8 @@ class TerminalCard(tk.Toplevel):
         self.place_tree.delete(*self.place_tree.get_children())
         for p in data["placements"]:
             self.place_tree.insert("", "end", values=(
-                p["place_type"], p["m_id"] or "", p["moved_at"], p["comment"] or "",
+                PLACE_LABELS.get(p["place_type"], p["place_type"]),
+                p["m_id"] or "", p["moved_at"], p["comment"] or "",
             ))
 
         self.repair_tree.delete(*self.repair_tree.get_children())
@@ -178,7 +242,6 @@ class TerminalCard(tk.Toplevel):
             ))
             self._repair_ids_by_iid[iid] = r["id"]
 
-    # ------------------------------------------------------------------
     def _save(self):
         if self.read_only:
             return
@@ -206,13 +269,11 @@ class TerminalCard(tk.Toplevel):
     def _move(self):
         if self.read_only:
             return
-        place = simpledialog.askstring(
-            "Перемещение", "Куда переместить (merchant / warehouse / repair_shop):", parent=self
-        )
-        if place not in ("merchant", "warehouse", "repair_shop"):
-            if place is not None:
-                messagebox.showerror("Ошибка", "Допустимо: merchant / warehouse / repair_shop", parent=self)
+        dlg = MoveDialog(self, self.data["current_place"] if self.data else "warehouse")
+        place = dlg.result
+        if place is None:
             return
+
         merchant_db_id = None
         if place == "merchant":
             m_id = simpledialog.askstring("M/id", "M/id мерчанта:", parent=self)
@@ -225,6 +286,7 @@ class TerminalCard(tk.Toplevel):
                 messagebox.showerror("Ошибка", f"Мерчант с M/id={m_id} не найден", parent=self)
                 return
             merchant_db_id = match["id"]
+
         comment = simpledialog.askstring("Комментарий", "Комментарий (необязательно):", parent=self) or None
         with database.get_connection() as conn:
             database.move_terminal(conn, self.terminal_id, place, self.user["id"],
@@ -315,7 +377,6 @@ class TerminalCard(tk.Toplevel):
                 parent=self,
             )
 
-    # ------------------------------------------------------------------
     def _on_close(self):
         if not self.read_only:
             with database.get_connection() as conn:
