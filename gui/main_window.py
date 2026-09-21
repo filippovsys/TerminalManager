@@ -120,7 +120,7 @@ class MainWindow(tk.Tk):
         self._current_cols = None
         self._current_tab_key = None
 
-        self.title(f"HalkTerminalManager v{config.APP_VERSION} -- {user['full_name']} ({user['role']})")
+        self.title(f"Terminal Manager v{config.APP_VERSION} -- {user['full_name']} ({user['role']})")
 
         # Разворачиваем на весь экран (не блокирует кнопку свернуть/закрыть)
         self.geometry("1360x780")  # fallback
@@ -199,6 +199,8 @@ class MainWindow(tk.Tk):
 
         # --- Справка ---
         help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="Открыть папку с логами", command=self._open_logs_folder)
+        help_menu.add_separator()
         help_menu.add_command(label="О программе", command=self._show_about)
         menubar.add_cascade(label="Справка", menu=help_menu)
 
@@ -225,6 +227,22 @@ class MainWindow(tk.Tk):
     def _open_merchant_report(self, merchant_id):
         from gui.merchant_report import MerchantReportWindow
         MerchantReportWindow(self, self.user, merchant_id)
+
+    def _open_logs_folder(self):
+        import os
+        import subprocess
+        try:
+            import logger
+            path = logger.get_log_dir()
+        except Exception:
+            path = None
+        if not path or not os.path.exists(path):
+            messagebox.showinfo("Инфо", "Папка с логами ещё не создана.", parent=self)
+            return
+        try:
+            subprocess.Popen(["explorer", os.path.normpath(path)])
+        except Exception as exc:
+            messagebox.showerror("Ошибка", f"Не удалось открыть папку:\n{exc}", parent=self)
 
     # ------------------------------------------------------------------
     # Действия по выделенной строке (меню верхнее + контекстное)
@@ -265,7 +283,6 @@ class MainWindow(tk.Tk):
             if d:
                 return d.get("merchant_id")
         if kind in ("terminal_node", "warehouse", "written_off"):
-            # Попробуем определить текущего мерчанта терминала
             tid = info[1]
             with database.get_connection() as conn:
                 row = conn.execute("""
@@ -273,7 +290,6 @@ class MainWindow(tk.Tk):
                 """, (tid,)).fetchone()
             if row and row["current_merchant_id"]:
                 return row["current_merchant_id"]
-            # Иначе — по активному ID
             with database.get_connection() as conn:
                 row = conn.execute("""
                     SELECT ti.merchant_id
@@ -459,7 +475,7 @@ class MainWindow(tk.Tk):
     def _show_about(self):
         with database.get_connection() as conn:
             history = database.get_version_history(conn, limit=10)
-        lines = [f"HalkTerminalManager, версия {config.APP_VERSION}", "", "История версий:"]
+        lines = [f"Terminal Manager, версия {config.APP_VERSION}", "", "История версий:"]
         for h in history:
             lines.append(f"  {h['version']} -- {h['installed_at']}" + (f" ({h['notes']})" if h["notes"] else ""))
         messagebox.showinfo("О программе", "\n".join(lines), parent=self)
@@ -519,7 +535,6 @@ class MainWindow(tk.Tk):
         self.tree.pack(fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_select())
         self.tree.bind("<Double-1>", lambda e: self._on_double_click())
-        # Контекстное меню по правому клику
         self.tree.bind("<Button-3>", self._on_right_click)
         self.tree.tag_configure("group", font=("TkDefaultFont", 9, "bold"), background="#d9e2ef")
         self.tree.tag_configure("terminal", font=("TkDefaultFont", 9, "bold"), background="#eef3f9")
@@ -891,7 +906,6 @@ class MainWindow(tk.Tk):
         info = self._get_single_selection_info()
 
         if info is None:
-            # Множественное выделение -- только групповые операции
             self.context_menu.add_command(label="Закрыть выбранные ID...",
                                           command=self._close_selected_ids)
             self.context_menu.add_command(label="Переместить выбранные терминалы...",

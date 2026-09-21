@@ -12,6 +12,8 @@ from gui.new_id_dialog import NewIdDialog
 class MerchantCard(tk.Toplevel):
     def __init__(self, master, user, merchant_id, on_close=None):
         super().__init__(master)
+        from gui.icons import set_window_icon
+        set_window_icon(self)
         self.user = user
         self.merchant_id = merchant_id
         self.on_close_callback = on_close

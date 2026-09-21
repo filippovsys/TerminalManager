@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-database.py -- слой доступа к данным HalkTerminalManager.
+database.py -- слой доступа к данным Terminal Manager.
 
 Все функции (кроме get_connection/init_db) принимают уже открытое
 соединение `conn` первым аргументом -- это позволяет GUI объединять

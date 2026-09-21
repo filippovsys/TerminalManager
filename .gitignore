@@ -36,3 +36,16 @@ __pycache__/
 *.pyc
 data/*.backup-*
 *.db.backup*
+instance.lock
+*.lock
+dist/
+build/
+*.pyc
+__pycache__/
+instance.lock
+build/
+dist/
+*.spec.bak
+instance.lock
+data/logs/
+*.log

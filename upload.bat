@@ -2,13 +2,13 @@
 chcp 65001 >nul
 setlocal EnableExtensions EnableDelayedExpansion
 
-title HalkTerminalManager - UPLOAD
+title Terminal Manager - UPLOAD
 
 cd /d "%~dp0"
 
 echo.
 echo ============================================================
-echo          HalkTerminalManager - UPLOAD TO GITHUB
+echo          Terminal Manager - UPLOAD TO GITHUB
 echo ============================================================
 echo.
 echo Project:

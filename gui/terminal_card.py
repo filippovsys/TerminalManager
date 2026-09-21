@@ -56,6 +56,8 @@ class MoveDialog(tk.Toplevel):
 class TerminalCard(tk.Toplevel):
     def __init__(self, master, user, terminal_id, on_close=None):
         super().__init__(master)
+        from gui.icons import set_window_icon
+        set_window_icon(self)
         self.user = user
         self.terminal_id = terminal_id
         self.on_close_callback = on_close

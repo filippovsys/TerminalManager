@@ -1,4 +1,4 @@
-# HalkTerminalManager -- журнал версий
+# Terminal Manager -- журнал версий
 
 Версия хранится в `config.APP_VERSION` и автоматически пишется в таблицу
 `app_version_log` при каждом запуске программы (`database.log_app_version_if_new`,

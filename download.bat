@@ -2,13 +2,13 @@
 chcp 65001 >nul
 setlocal EnableExtensions EnableDelayedExpansion
 
-title HalkTerminalManager - DOWNLOAD
+title Terminal Manager - DOWNLOAD
 
 cd /d "%~dp0"
 
 echo.
 echo ============================================================
-echo        HalkTerminalManager - DOWNLOAD FROM GITHUB
+echo        Terminal Manager - DOWNLOAD FROM GITHUB
 echo ============================================================
 echo.
 echo Project:
