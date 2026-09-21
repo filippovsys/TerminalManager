@@ -6,6 +6,9 @@ from tkinter import ttk, messagebox, simpledialog
 
 import database
 from gui import utils
+from gui.new_id_dialog import NewIdDialog
+from gui.edit_id_dialog import EditIdDialog
+from gui.repair_dialog import RepairDialog
 
 
 PLACE_LABELS = {"merchant": "У клиента", "warehouse": "Склад", "repair_shop": "Мастерская"}
@@ -54,7 +57,7 @@ class TerminalCard(tk.Toplevel):
         self.read_only = False
 
         self.title("Терминал")
-        self.geometry("760x620")
+        self.geometry("800x640")
 
         with database.get_connection() as conn:
             ok, lock_info = database.acquire_lock(conn, "terminal", terminal_id, user["id"])
@@ -104,7 +107,8 @@ class TerminalCard(tk.Toplevel):
         ttk.Button(btns, text="Сохранить", command=self._save).pack(side="left", padx=2)
         ttk.Button(btns, text="Сменить SIM/IP", command=self._change_connection).pack(side="left", padx=2)
         ttk.Button(btns, text="Переместить...", command=self._move).pack(side="left", padx=2)
-        ttk.Button(btns, text="Отправить в ремонт", command=self._create_repair).pack(side="left", padx=2)
+        ttk.Button(btns, text="Ремонт...", command=self._open_repair).pack(side="left", padx=2)
+        ttk.Button(btns, text="Добавить ID...", command=self._add_id).pack(side="left", padx=2)
         self.writeoff_btn = ttk.Button(btns, text="Списать", command=self._write_off)
         self.writeoff_btn.pack(side="left", padx=2)
         if self.user["role"] != "admin":
@@ -128,9 +132,17 @@ class TerminalCard(tk.Toplevel):
             self.ids_tree.heading(c, text=ids_headings[c])
             self.ids_tree.column(c, width=100, anchor="w")
         self.ids_tree.pack(fill="both", expand=True)
+        self.ids_tree.bind("<Double-1>", lambda e: self._edit_selected_id())
+
         self._binding_ids_by_iid = {}
-        self.close_id_btn = ttk.Button(ids_frame, text="Закрыть выбранный ID", command=self._close_selected_id)
-        self.close_id_btn.pack(anchor="w", pady=(4, 0))
+
+        btns_below = ttk.Frame(ids_frame)
+        btns_below.pack(anchor="w", pady=(4, 0))
+        ttk.Button(btns_below, text="Редактировать ID",
+                   command=self._edit_selected_id).pack(side="left", padx=2)
+        self.close_id_btn = ttk.Button(btns_below, text="Закрыть выбранный ID",
+                                        command=self._close_selected_id)
+        self.close_id_btn.pack(side="left", padx=2)
 
         # --- "SN история" ---
         hist_frame = ttk.Frame(notebook)
@@ -159,7 +171,7 @@ class TerminalCard(tk.Toplevel):
                                            {"reason": "Причина", "sent_at": "Отправлен",
                                             "returned_at": "Вернулся", "firmware_at": "Прошит",
                                             "result": "Результат"})
-        self.repair_tree.bind("<Double-1>", self._edit_repair)
+        self.repair_tree.bind("<Double-1>", self._edit_repair_by_dbl)
 
         if self.read_only:
             for child in top.winfo_children():
@@ -291,19 +303,14 @@ class TerminalCard(tk.Toplevel):
                                     merchant_id=merchant_db_id, comment=comment)
         self._load()
 
-    def _create_repair(self):
+    def _open_repair(self):
         if self.read_only:
             return
-        reason = simpledialog.askstring("Ремонт", "Причина неисправности:", parent=self)
-        if reason is None:
-            return
-        sent_at = simpledialog.askstring("Дата", "Дата отправки в ремонт (ГГГГ-ММ-ДД, можно пусто):", parent=self)
-        with database.get_connection() as conn:
-            database.create_repair(conn, self.terminal_id, reason, self.user["id"], sent_at=sent_at or None)
-            database.move_terminal(conn, self.terminal_id, "repair_shop", self.user["id"], comment=reason)
-        self._load()
+        dlg = RepairDialog(self, self.user, self.terminal_id)
+        if dlg.result:
+            self._load()
 
-    def _edit_repair(self, event):
+    def _edit_repair_by_dbl(self, event):
         if self.read_only:
             return
         selection = self.repair_tree.selection()
@@ -312,22 +319,9 @@ class TerminalCard(tk.Toplevel):
         repair_id = self._repair_ids_by_iid.get(selection[0])
         if repair_id is None:
             return
-        field = simpledialog.askstring(
-            "Обновить ремонт",
-            "Что заполнить: returned_at / firmware_at / result (введите значение через ':'):\n"
-            "например returned_at:2026-09-12",
-            parent=self,
-        )
-        if not field or ":" not in field:
-            return
-        key, _, value = field.partition(":")
-        key = key.strip()
-        if key not in ("returned_at", "firmware_at", "result", "comment", "reason", "sent_at"):
-            messagebox.showerror("Ошибка", "Неизвестное поле", parent=self)
-            return
-        with database.get_connection() as conn:
-            database.update_repair(conn, repair_id, self.user["id"], **{key: value.strip()})
-        self._load()
+        dlg = RepairDialog(self, self.user, self.terminal_id, repair_id=repair_id)
+        if dlg.result:
+            self._load()
 
     def _write_off(self):
         if self.user["role"] != "admin":
@@ -345,6 +339,33 @@ class TerminalCard(tk.Toplevel):
                 return
         self._load()
         messagebox.showinfo("Готово", "Терминал списан.", parent=self)
+
+    def _add_id(self):
+        if self.read_only:
+            return
+        sn = self.data["terminal"]["serial_number"] if self.data else None
+        dlg = NewIdDialog(self, self.user, prefill_sn=sn)
+        if dlg.result:
+            self._load()
+
+    def _edit_selected_id(self):
+        if self.read_only:
+            return
+        selection = self.ids_tree.selection()
+        if not selection:
+            messagebox.showinfo("Выбор", "Сначала выберите ID в таблице", parent=self)
+            return
+        binding_id, _ = self._binding_ids_by_iid[selection[0]]
+        with database.get_connection() as conn:
+            row = conn.execute(
+                "SELECT terminal_id_ref FROM terminal_id_bindings WHERE id = ?",
+                (binding_id,),
+            ).fetchone()
+        if row is None:
+            return
+        dlg = EditIdDialog(self, self.user, row["terminal_id_ref"])
+        if dlg.result:
+            self._load()
 
     def _close_selected_id(self):
         if self.read_only:

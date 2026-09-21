@@ -581,13 +581,26 @@ def move_terminal(conn, terminal_id, place_type, user_id, merchant_id=None, comm
 # Платёжные ID и привязки
 # =============================================================================
 
-def create_terminal_id(conn, payment_id, transit_account, merchant_id, owner_label, point_label):
-    cur = conn.execute(
-        "INSERT INTO terminal_ids (payment_id, transit_account, merchant_id, owner_label, point_label) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (payment_id, transit_account, merchant_id, owner_label, point_label),
+def update_terminal_id_fields(conn, terminal_id_ref, user_id, **fields):
+    """Обновляет поля конкретной записи terminal_ids с аудитом."""
+    allowed = {"transit_account", "settlement_account", "owner_label", "point_label",
+               "address", "phone", "install_date", "issue_date", "note"}
+    changes = {k: v for k, v in fields.items() if k in allowed}
+    if not changes:
+        return
+    old_row = conn.execute(
+        "SELECT * FROM terminal_ids WHERE id = ?", (terminal_id_ref,)
+    ).fetchone()
+    if old_row is None:
+        raise ValueError("ID не найден")
+    set_clause = ", ".join(f"{f} = ?" for f in changes)
+    conn.execute(
+        f"UPDATE terminal_ids SET {set_clause} WHERE id = ?",
+        (*changes.values(), terminal_id_ref),
     )
-    return cur.lastrowid
+    for field, new_value in changes.items():
+        log_change(conn, user_id, "terminal_id", terminal_id_ref,
+                   field, old_row[field], new_value)
 
 
 def bind_terminal_id(conn, terminal_id, terminal_id_ref, user_id):

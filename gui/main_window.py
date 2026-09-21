@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """Главное окно: вкладки под сводкой, дерево с группировкой
-Тип клиента -> Физ.терминал -> ID. Сортировка ID -- по дате выдачи.
-Колонки настраиваются через "Справочники -> Настройки колонок...".
-"""
+Тип клиента -> Физ.терминал -> ID."""
 
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
@@ -16,6 +14,8 @@ from gui.merchant_card import MerchantCard
 from gui.users_window import UsersWindow
 from gui.merchants_list_window import MerchantsListWindow
 from gui.terminals_list_window import TerminalsListWindow
+from gui.new_id_dialog import NewIdDialog
+from gui.edit_id_dialog import EditIdDialog
 
 TYPE_LABELS = {"bank": "BANK", "edara": "EDARA", "telekeci": "TELEKEÇI", "hk": "H/K"}
 PLACE_LABELS = {"merchant": "У клиента", "warehouse": "Склад", "repair_shop": "Мастерская"}
@@ -74,7 +74,6 @@ def _first_not_empty(rows, key):
 
 
 def _date_sort_key(value):
-    """Пустые значения -- в начало, дальше лексикографически (ISO-даты)."""
     return value or ""
 
 
@@ -89,7 +88,6 @@ class MainWindow(tk.Tk):
         self.query_var = tk.StringVar()
         self._pending_restore = None
         self._row_by_iid = {}
-
         self._current_cols = None
         self._current_tab_key = None
 
@@ -107,15 +105,15 @@ class MainWindow(tk.Tk):
 
         self._select_tab("active")
 
-    # ------------------------------------------------------------------
-    # Меню
-    # ------------------------------------------------------------------
     def _build_menu(self):
         menubar = tk.Menu(self)
-
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="Выход", command=self.destroy)
         menubar.add_cascade(label="Файл", menu=file_menu)
+
+        ops_menu = tk.Menu(menubar, tearoff=0)
+        ops_menu.add_command(label="Выдать новый ID...", command=self._open_new_id_dialog)
+        menubar.add_cascade(label="Операции", menu=ops_menu)
 
         refs_menu = tk.Menu(menubar, tearoff=0)
         refs_menu.add_command(label="Мерчанты...", command=self._open_merchants_list)
@@ -132,7 +130,6 @@ class MainWindow(tk.Tk):
         help_menu = tk.Menu(menubar, tearoff=0)
         help_menu.add_command(label="О программе", command=self._show_about)
         menubar.add_cascade(label="Справка", menu=help_menu)
-
         self.config(menu=menubar)
 
     def _open_users_window(self):
@@ -144,6 +141,11 @@ class MainWindow(tk.Tk):
     def _open_terminals_list(self):
         TerminalsListWindow(self, self.user)
 
+    def _open_new_id_dialog(self):
+        dlg = NewIdDialog(self, self.user)
+        if dlg.result:
+            self._refresh_current_list()
+
     def _show_about(self):
         with database.get_connection() as conn:
             history = database.get_version_history(conn, limit=10)
@@ -152,9 +154,6 @@ class MainWindow(tk.Tk):
             lines.append(f"  {h['version']} -- {h['installed_at']}" + (f" ({h['notes']})" if h["notes"] else ""))
         messagebox.showinfo("О программе", "\n".join(lines), parent=self)
 
-    # ------------------------------------------------------------------
-    # Сводка
-    # ------------------------------------------------------------------
     def _build_stats(self):
         self.stats_frame = ttk.LabelFrame(self, text="Сводка", padding=8)
         self.stats_frame.pack(fill="x", padx=10, pady=(10, 4))
@@ -165,9 +164,6 @@ class MainWindow(tk.Tk):
         for i, text in enumerate(lines):
             ttk.Label(self.stats_frame, text=text).grid(row=i // 5, column=i % 5, sticky="w", padx=10, pady=2)
 
-    # ------------------------------------------------------------------
-    # Вкладки
-    # ------------------------------------------------------------------
     def _build_tabs(self):
         self.tab_bar = ttk.Frame(self, padding=(10, 0))
         self.tab_bar.pack(fill="x")
@@ -182,9 +178,6 @@ class MainWindow(tk.Tk):
             b.pack(side="left", padx=1, pady=2)
             self.tab_buttons[key] = b
 
-    # ------------------------------------------------------------------
-    # Основная разметка
-    # ------------------------------------------------------------------
     def _build_body(self):
         content = ttk.Frame(self)
         content.pack(fill="both", expand=True, padx=10, pady=(4, 10))
@@ -197,6 +190,8 @@ class MainWindow(tk.Tk):
         search_entry.bind("<Return>", lambda e: self._refresh_current_list())
         ttk.Button(search_row, text="Найти", command=self._refresh_current_list).pack(side="left")
         ttk.Button(search_row, text="Сброс", command=self._reset_search).pack(side="left", padx=4)
+        ttk.Button(search_row, text="+ Выдать ID...", command=self._open_new_id_dialog).pack(
+            side="left", padx=(20, 4))
 
         self.filter_row = ttk.Frame(content)
         self.filter_row.pack(fill="x", pady=(0, 4))
@@ -228,24 +223,18 @@ class MainWindow(tk.Tk):
         self.ownership_filter_var.set("Все")
         self._refresh_current_list()
 
-    # ------------------------------------------------------------------
-    # Колонки
-    # ------------------------------------------------------------------
     def _apply_column_spec(self, tab_key):
         all_cols, headings, default_widths = _column_spec()[tab_key]
         settings = column_settings.load_settings()
         tab_settings = settings.get(tab_key, {})
         visible = tab_settings.get("visible") or list(all_cols)
-        visible = [c for c in visible if c in all_cols]
-        if not visible:
-            visible = list(all_cols)
+        visible = [c for c in visible if c in all_cols] or list(all_cols)
         widths = tab_settings.get("widths", {})
 
         try:
             self.tree.configure(displaycolumns="#all")
         except Exception:
             pass
-
         self.tree.configure(columns=all_cols, show="tree headings")
         self.tree.heading("#0", text="№ / S/N / ID")
         w0 = widths.get("#0", 340)
@@ -254,7 +243,6 @@ class MainWindow(tk.Tk):
             self.tree.heading(c, text=headings[c])
             w = widths.get(c, default_widths[c])
             self.tree.column(c, width=w, anchor="w")
-
         try:
             self.tree.configure(displaycolumns=visible)
         except Exception:
@@ -306,15 +294,11 @@ class MainWindow(tk.Tk):
             pass
         super().destroy()
 
-    # ------------------------------------------------------------------
-    # Переключение вкладок
-    # ------------------------------------------------------------------
     def _select_tab(self, tab):
         try:
             self._save_current_widths()
         except Exception:
             pass
-
         self.current_tab = tab
         for key, b in self.tab_buttons.items():
             b.configure(style="Selected.TButton" if key == tab else "TButton")
@@ -328,7 +312,6 @@ class MainWindow(tk.Tk):
     def _build_filter_row(self):
         for w in self.filter_row.winfo_children():
             w.destroy()
-
         with database.get_connection() as conn:
             if self.current_tab == "active":
                 types = sorted({r["merchant_type"] for r in database.get_active_terminal_ids(conn) if r["merchant_type"]})
@@ -338,7 +321,6 @@ class MainWindow(tk.Tk):
                 types = []
             models = database.get_distinct_models(conn)
             ownerships = database.get_distinct_ownerships(conn)
-
         if types:
             ttk.Label(self.filter_row, text="Тип:").pack(side="left", padx=(0, 2))
             ordered = [t for t in _PREFERRED_TYPE_ORDER if t in types] + [t for t in types if t not in _PREFERRED_TYPE_ORDER]
@@ -347,13 +329,11 @@ class MainWindow(tk.Tk):
             for t in ordered:
                 ttk.Radiobutton(self.filter_row, text=_type_label(t), variable=self.filter_var, value=t,
                                 command=self._refresh_current_list).pack(side="left", padx=2)
-
         ttk.Label(self.filter_row, text="  Модель:").pack(side="left", padx=(12, 2))
         model_cb = ttk.Combobox(self.filter_row, textvariable=self.model_filter_var,
                                 values=[""] + models, state="readonly", width=18)
         model_cb.pack(side="left")
         model_cb.bind("<<ComboboxSelected>>", lambda e: self._refresh_current_list())
-
         ttk.Label(self.filter_row, text="  Собств.:").pack(side="left", padx=(12, 2))
         own_values = ["Все"] + [OWNERSHIP_DISPLAY.get(o, o) for o in ownerships]
         own_cb = ttk.Combobox(self.filter_row, textvariable=self.ownership_filter_var,
@@ -372,9 +352,6 @@ class MainWindow(tk.Tk):
                     break
         return model, own_code
 
-    # ------------------------------------------------------------------
-    # Обновление списка + сводки
-    # ------------------------------------------------------------------
     def _refresh_current_list(self):
         query = self.query_var.get().strip() or None
         model, ownership = self._read_filters()
@@ -389,7 +366,6 @@ class MainWindow(tk.Tk):
                 stats = database.get_active_dashboard_stats(conn)
             self._render_active_tree(rows)
             self._set_stats(self._format_active_stats(stats))
-
         elif self.current_tab == "warehouse":
             self._apply_column_spec("warehouse")
             with database.get_connection() as conn:
@@ -401,7 +377,6 @@ class MainWindow(tk.Tk):
                 f"В мастерской: {stats['repair_shop']}",
                 f"Всего: {stats['total']}",
             ])
-
         elif self.current_tab == "written_off":
             self._apply_column_spec("written_off")
             with database.get_connection() as conn:
@@ -409,8 +384,7 @@ class MainWindow(tk.Tk):
                 stats = database.get_written_off_dashboard_stats(conn)
             self._render_written_off_tree(rows)
             self._set_stats([f"Списано всего: {stats['total']}"])
-
-        else:  # epos
+        else:
             self._apply_column_spec("epos")
             with database.get_connection() as conn:
                 rows = database.get_epos_terminals(conn, query=query, model=model)
@@ -448,9 +422,6 @@ class MainWindow(tk.Tk):
                 lines.append(f"{_type_label(t)}: {terms} терм. / {ids} ID")
         return lines
 
-    # ------------------------------------------------------------------
-    # Вкладка "Активные" -- дерево: Тип -> Физ.терминал -> ID
-    # ------------------------------------------------------------------
     def _render_active_tree(self, rows):
         self.tree.delete(*self.tree.get_children())
         self._row_by_iid = {}
@@ -459,23 +430,19 @@ class MainWindow(tk.Tk):
             groups.setdefault(r["merchant_type"] or "unknown", []).append(r)
         order = [t for t in _PREFERRED_TYPE_ORDER if t in groups]
         order += sorted(t for t in groups if t not in _PREFERRED_TYPE_ORDER)
-
         term_num = 0
-
         for t in order:
             group_rows = groups[t]
             terminals = {}
             for r in group_rows:
                 terminals.setdefault(r["terminal_id"], []).append(r)
 
-            # Сортировка терминалов по самой РАННЕЙ дате выдачи среди их ID.
             def term_sort_key(item):
                 _, t_rows = item
                 dates = [_date_sort_key(r.get("issue_date")) for r in t_rows]
                 return min(dates) if dates else ""
 
             terminals_sorted = sorted(terminals.items(), key=term_sort_key)
-
             type_node = self.tree.insert(
                 "", "end",
                 text=f"— {_type_label(t)} —   {len(terminals)} терм. / {len(group_rows)} ID",
@@ -484,53 +451,37 @@ class MainWindow(tk.Tk):
                 open=False,
             )
             self._row_by_iid[type_node] = ("type_node", t, len(terminals), len(group_rows))
-
             for term_id, term_rows in terminals_sorted:
-                # ID внутри терминала -- по дате выдачи (по возрастанию)
                 term_rows.sort(key=lambda r: _date_sort_key(r.get("issue_date")))
-
                 term_num += 1
                 sn = term_rows[0]["serial_number"] or "(без S/N)"
                 model = term_rows[0]["model"] or "—"
-
                 point = _first_not_empty(term_rows, "point_label")
                 address = _first_not_empty(term_rows, "address")
                 phone = _first_not_empty(term_rows, "phone")
                 own = OWNERSHIP_SHORT.get(term_rows[0]["ownership"], "")
-
                 values_map = {"point": point, "address": address, "phone": phone,
                               "own": own, "owner": ""}
                 values = tuple(values_map.get(c, "") for c in self._current_cols)
-
                 term_node = self.tree.insert(
                     type_node, "end",
                     text=f"{term_num}. S/N: {sn}  •  {model}  •  {len(term_rows)} ID",
-                    values=values,
-                    tags=("terminal",),
-                    open=False,
+                    values=values, tags=("terminal",), open=False,
                 )
                 self._row_by_iid[term_node] = ("terminal_node", term_id)
-
                 for i, r in enumerate(term_rows, start=1):
-                    vmap = {
-                        "point": r["point_label"] or "",
-                        "address": r["address"] or "",
-                        "phone": r["phone"] or "",
-                        "own": OWNERSHIP_SHORT.get(r["ownership"], ""),
-                        "owner": r["owner_label"] or "",
-                    }
+                    vmap = {"point": r["point_label"] or "", "address": r["address"] or "",
+                            "phone": r["phone"] or "",
+                            "own": OWNERSHIP_SHORT.get(r["ownership"], ""),
+                            "owner": r["owner_label"] or ""}
                     v = tuple(vmap.get(c, "") for c in self._current_cols)
                     iid = self.tree.insert(
                         term_node, "end",
                         text=f"    {i}. {r['payment_id']}",
-                        values=v,
-                        tags=("item",),
+                        values=v, tags=("item",),
                     )
-                    self._row_by_iid[iid] = ("active", r["binding_id"])
+                    self._row_by_iid[iid] = ("active", r["binding_id"], r["terminal_id_ref"])
 
-    # ------------------------------------------------------------------
-    # Вкладка "E-POS"
-    # ------------------------------------------------------------------
     def _render_epos_tree(self, rows):
         self.tree.delete(*self.tree.get_children())
         self._row_by_iid = {}
@@ -539,24 +490,19 @@ class MainWindow(tk.Tk):
             groups.setdefault(r["merchant_type"] or "unknown", []).append(r)
         order = [t for t in _PREFERRED_TYPE_ORDER if t in groups]
         order += sorted(t for t in groups if t not in _PREFERRED_TYPE_ORDER)
-
         term_num = 0
-
         for t in order:
             group_rows = groups[t]
             terminals = {}
             for r in group_rows:
                 terminals.setdefault(r["terminal_id"], []).append(r)
-
             type_node = self.tree.insert(
                 "", "end",
                 text=f"— {_type_label(t)} —   {len(terminals)} терм. / {len(group_rows)} ID",
                 values=tuple([""] * len(self._current_cols)),
-                tags=("group",),
-                open=False,
+                tags=("group",), open=False,
             )
             self._row_by_iid[type_node] = ("type_node", t, len(terminals), len(group_rows))
-
             for term_id, term_rows in terminals.items():
                 term_num += 1
                 model = term_rows[0]["model"] or "E-POS"
@@ -564,77 +510,54 @@ class MainWindow(tk.Tk):
                 point = _first_not_empty(term_rows, "point_label")
                 address = _first_not_empty(term_rows, "address")
                 phone = _first_not_empty(term_rows, "phone")
-
                 values_map = {"point": point, "address": address, "phone": phone,
                               "own": own, "owner": ""}
                 values = tuple(values_map.get(c, "") for c in self._current_cols)
-
                 term_node = self.tree.insert(
                     type_node, "end",
                     text=f"{term_num}. {model}  •  {own}  •  {len(term_rows)} ID",
-                    values=values,
-                    tags=("terminal",),
-                    open=False,
+                    values=values, tags=("terminal",), open=False,
                 )
                 self._row_by_iid[term_node] = ("terminal_node", term_id)
-
                 for r in term_rows:
-                    vmap = {
-                        "point": r["point_label"] or "",
-                        "address": r["address"] or "",
-                        "phone": r["phone"] or "",
-                        "own": "",
-                        "owner": r["owner_label"] or "",
-                    }
+                    vmap = {"point": r["point_label"] or "", "address": r["address"] or "",
+                            "phone": r["phone"] or "", "own": "",
+                            "owner": r["owner_label"] or ""}
                     v = tuple(vmap.get(c, "") for c in self._current_cols)
                     iid = self.tree.insert(
                         term_node, "end",
                         text=f"    {r['payment_id'] or '(без ID)'}",
-                        values=v,
-                        tags=("item",),
+                        values=v, tags=("item",),
                     )
-                    self._row_by_iid[iid] = ("epos", r["binding_id"], r["terminal_id"])
+                    self._row_by_iid[iid] = ("epos", r["binding_id"], r["terminal_id"], r["terminal_id"])
 
-    # ------------------------------------------------------------------
-    # Вкладка "Склад"
-    # ------------------------------------------------------------------
     def _render_warehouse_tree(self, rows):
         self.tree.delete(*self.tree.get_children())
         self._row_by_iid = {}
         for i, r in enumerate(rows, start=1):
             place_text = PLACE_LABELS.get(r["current_place"], r["current_place"])
-            vmap = {
-                "num": i, "sn": r["serial_number"] or "(без S/N)", "model": r["model"] or "",
-                "own": OWNERSHIP_SHORT.get(r["ownership"], ""), "place": place_text,
-                "condition": CONDITION_LABELS.get(r["condition"], r["condition"]),
-                "moved_by": r["moved_by_name"] or "", "moved_at": r["last_moved_at"] or "",
-                "comment": r["last_comment"] or "",
-            }
+            vmap = {"num": i, "sn": r["serial_number"] or "(без S/N)", "model": r["model"] or "",
+                    "own": OWNERSHIP_SHORT.get(r["ownership"], ""), "place": place_text,
+                    "condition": CONDITION_LABELS.get(r["condition"], r["condition"]),
+                    "moved_by": r["moved_by_name"] or "", "moved_at": r["last_moved_at"] or "",
+                    "comment": r["last_comment"] or ""}
             v = tuple(vmap.get(c, "") for c in self._current_cols)
             iid = self.tree.insert("", "end", text="", values=v, tags=("item",))
             self._row_by_iid[iid] = ("warehouse", r["terminal_id"], r)
 
-    # ------------------------------------------------------------------
-    # Вкладка "Списанные"
-    # ------------------------------------------------------------------
     def _render_written_off_tree(self, rows):
         self.tree.delete(*self.tree.get_children())
         self._row_by_iid = {}
         for i, r in enumerate(rows, start=1):
-            vmap = {
-                "num": i, "sn": r["serial_number"] or "(без S/N)", "model": r["model"] or "",
-                "own": OWNERSHIP_SHORT.get(r["ownership"], ""),
-                "written_off_at": r["written_off_at"] or "",
-                "reason": r["reason"] or "", "comment": r["comment"] or "",
-                "approved_by": r["approved_by_name"] or "",
-            }
+            vmap = {"num": i, "sn": r["serial_number"] or "(без S/N)", "model": r["model"] or "",
+                    "own": OWNERSHIP_SHORT.get(r["ownership"], ""),
+                    "written_off_at": r["written_off_at"] or "",
+                    "reason": r["reason"] or "", "comment": r["comment"] or "",
+                    "approved_by": r["approved_by_name"] or ""}
             v = tuple(vmap.get(c, "") for c in self._current_cols)
             iid = self.tree.insert("", "end", text="", values=v, tags=("item",))
             self._row_by_iid[iid] = ("written_off", r["terminal_id"], r)
 
-    # ------------------------------------------------------------------
-    # Обработка выбора
-    # ------------------------------------------------------------------
     def _on_select(self):
         selection = self.tree.selection()
         if not selection:
@@ -646,7 +569,7 @@ class MainWindow(tk.Tk):
             return
         kind = info[0]
         if kind in ("active", "epos"):
-            self._show_id_detail(info[1])
+            self._show_id_detail(info[1], info[2] if len(info) > 2 else None)
         elif kind == "terminal_node":
             self._show_terminal_node_detail(info[1])
         elif kind == "type_node":
@@ -665,6 +588,10 @@ class MainWindow(tk.Tk):
             return
         kind = info[0]
         if kind == "active":
+            # Двойной клик по активному ID -- редактировать сам ID
+            if len(info) > 2 and info[2]:
+                self._edit_id(info[2])
+                return
             with database.get_connection() as conn:
                 d = database.get_terminal_id_detail(conn, info[1])
             if d:
@@ -688,17 +615,15 @@ class MainWindow(tk.Tk):
             w.destroy()
         for i, (caption, value) in enumerate(fields):
             ttk.Label(self.detail_body, text=f"{caption}:", font=("TkDefaultFont", 9, "bold")).grid(
-                row=i, column=0, sticky="ne", padx=4, pady=3
-            )
+                row=i, column=0, sticky="ne", padx=4, pady=3)
             ttk.Label(self.detail_body, text=value or "-", wraplength=280, justify="left").grid(
-                row=i, column=1, sticky="nw", padx=4, pady=3
-            )
+                row=i, column=1, sticky="nw", padx=4, pady=3)
         for w in self.detail_actions.winfo_children():
             w.destroy()
         for label, cmd in actions:
             ttk.Button(self.detail_actions, text=label, command=cmd).pack(side="left", padx=2)
 
-    def _show_id_detail(self, binding_id):
+    def _show_id_detail(self, binding_id, terminal_id_ref=None):
         with database.get_connection() as conn:
             d = database.get_terminal_id_detail(conn, binding_id)
         if d is None:
@@ -718,13 +643,23 @@ class MainWindow(tk.Tk):
             ("Дата установки", d.get("install_date")),
             ("Дата выдачи", d.get("issue_date")),
         ]
+        tid_ref = d.get("terminal_id_ref") or terminal_id_ref
         actions = [
+            ("Редактировать ID", lambda: self._edit_id(tid_ref)),
             ("Карточка терминала", lambda: self._open_terminal_card(d["terminal_id"])),
             ("Карточка мерчанта", lambda: self._open_merchant_card(d["merchant_id"])),
         ]
         if self.current_tab == "active":
             actions.insert(0, ("Закрыть ID", lambda: self._close_active(binding_id)))
         self._show_detail(fields, actions)
+
+    def _edit_id(self, terminal_id_ref):
+        if not terminal_id_ref:
+            messagebox.showinfo("Инфо", "Не удалось определить ID для редактирования", parent=self)
+            return
+        dlg = EditIdDialog(self, self.user, terminal_id_ref)
+        if dlg.result:
+            self._refresh_current_list()
 
     def _show_terminal_node_detail(self, terminal_id):
         with database.get_connection() as conn:
@@ -773,7 +708,6 @@ class MainWindow(tk.Tk):
         actions = [("Карточка терминала", lambda: self._open_terminal_card(terminal_id))]
         self._show_detail(fields, actions)
 
-    # ------------------------------------------------------------------
     def _close_active(self, binding_id):
         if not messagebox.askyesno("Подтверждение", "Закрыть этот ID у клиента?", parent=self):
             return
@@ -781,16 +715,13 @@ class MainWindow(tk.Tk):
         with database.get_connection() as conn:
             moved_to_warehouse = database.close_terminal_id(conn, binding_id, self.user["id"], comment=comment)
         if moved_to_warehouse:
-            messagebox.showinfo(
-                "Готово",
+            messagebox.showinfo("Готово",
                 "ID закрыт. Это был последний активный ID терминала -- он автоматически перемещён на склад.",
-                parent=self,
-            )
+                parent=self)
         else:
             messagebox.showinfo("Готово", "ID закрыт.", parent=self)
         self._refresh_current_list()
 
-    # ------------------------------------------------------------------
     def _open_terminal_card(self, terminal_id):
         self._remember_selection()
         TerminalCard(self, self.user, terminal_id, on_close=self._after_card_closed)

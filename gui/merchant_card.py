@@ -6,6 +6,7 @@ from tkinter import ttk, messagebox, simpledialog
 
 import database
 from gui import utils
+from gui.new_id_dialog import NewIdDialog
 
 
 class MerchantCard(tk.Toplevel):
@@ -17,7 +18,7 @@ class MerchantCard(tk.Toplevel):
         self.read_only = False
 
         self.title("Мерчант")
-        self.geometry("620x480")
+        self.geometry("680x520")
 
         with database.get_connection() as conn:
             ok, lock_info = database.acquire_lock(conn, "merchant", merchant_id, user["id"])
@@ -71,6 +72,7 @@ class MerchantCard(tk.Toplevel):
         btns.grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Button(btns, text="Сохранить", command=self._save).pack(side="left", padx=2)
         ttk.Button(btns, text="Сохранить адрес/телефон", command=self._save_contact).pack(side="left", padx=2)
+        ttk.Button(btns, text="Добавить ID...", command=self._add_id).pack(side="left", padx=2)
         ttk.Button(btns, text="Закрыть обслуживание", command=lambda: self._set_status("closed")).pack(
             side="left", padx=2
         )
@@ -153,6 +155,14 @@ class MerchantCard(tk.Toplevel):
                 self.phone_var.get() or None, self.user["id"],
             )
         self._load()
+
+    def _add_id(self):
+        if self.read_only:
+            return
+        m_id = self.data["merchant"]["m_id"] if self.data else None
+        dlg = NewIdDialog(self, self.user, prefill_m_id=m_id)
+        if dlg.result:
+            self._load()
 
     def _set_status(self, status):
         if self.read_only:
