@@ -9,6 +9,7 @@ import config
 import database
 from gui import utils
 from gui import column_settings
+from gui import export_excel
 from gui.terminal_card import TerminalCard
 from gui.merchant_card import MerchantCard
 from gui.users_window import UsersWindow
@@ -20,8 +21,9 @@ from gui.edit_id_dialog import EditIdDialog
 TYPE_LABELS = {"bank": "BANK", "edara": "EDARA", "telekeci": "TELEKEÇI", "hk": "H/K"}
 PLACE_LABELS = {"merchant": "У клиента", "warehouse": "Склад", "repair_shop": "Мастерская"}
 CONDITION_LABELS = {
-    "normal": "Норма", "in_repair": "В ремонте",
-    "awaiting_firmware": "Ждёт прошивку", "written_off": "Списан",
+    "normal": "Норма",
+    "in_repair": "В ремонте",
+    "written_off": "Списан",
 }
 OWNERSHIP_SHORT = {"bank": "Банк", "client": "Клиент"}
 OWNERSHIP_DISPLAY = {"bank": "Банк", "client": "Клиент"}
@@ -77,6 +79,33 @@ def _date_sort_key(value):
     return value or ""
 
 
+class MoveTerminalsDialog(tk.Toplevel):
+    def __init__(self, master, count):
+        super().__init__(master)
+        self.title("Переместить терминалы")
+        self.resizable(False, False)
+        self.result = None
+
+        ttk.Label(self, text=f"Выделено терминалов: {count}",
+                  font=("TkDefaultFont", 10, "bold")).pack(padx=20, pady=(15, 10))
+
+        btns = ttk.Frame(self, padding=10)
+        btns.pack()
+        ttk.Button(btns, text="На склад", width=15,
+                   command=lambda: self._pick("warehouse")).pack(side="left", padx=4)
+        ttk.Button(btns, text="В мастерскую", width=15,
+                   command=lambda: self._pick("repair_shop")).pack(side="left", padx=4)
+        ttk.Button(self, text="Отмена", command=self.destroy).pack(pady=(0, 12))
+
+        self.transient(master)
+        self.grab_set()
+        self.wait_window(self)
+
+    def _pick(self, place):
+        self.result = place
+        self.destroy()
+
+
 class MainWindow(tk.Tk):
     def __init__(self, user):
         super().__init__()
@@ -92,10 +121,22 @@ class MainWindow(tk.Tk):
         self._current_tab_key = None
 
         self.title(f"HalkTerminalManager v{config.APP_VERSION} -- {user['full_name']} ({user['role']})")
-        self.geometry("1360x780")
+
+        # Разворачиваем на весь экран (не блокирует кнопку свернуть/закрыть)
+        self.geometry("1360x780")  # fallback
+        try:
+            self.state("zoomed")
+        except Exception:
+            try:
+                self.attributes("-zoomed", True)
+            except Exception:
+                pass
 
         self._style = ttk.Style(self)
         self._style.configure("Selected.TButton", font=("TkDefaultFont", 9, "bold"))
+
+        # Контекстное меню (правый клик по строке дерева)
+        self.context_menu = tk.Menu(self, tearoff=0)
 
         self._build_menu()
         self._build_stats()
@@ -105,16 +146,38 @@ class MainWindow(tk.Tk):
 
         self._select_tab("active")
 
+    # ------------------------------------------------------------------
+    # Меню
+    # ------------------------------------------------------------------
     def _build_menu(self):
         menubar = tk.Menu(self)
+
+        # --- Файл ---
         file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Экспорт текущей вкладки в Excel...",
+                              command=self._export_current_tab)
+        file_menu.add_separator()
         file_menu.add_command(label="Выход", command=self.destroy)
         menubar.add_cascade(label="Файл", menu=file_menu)
 
+        # --- Операции ---
         ops_menu = tk.Menu(menubar, tearoff=0)
         ops_menu.add_command(label="Выдать новый ID...", command=self._open_new_id_dialog)
+        ops_menu.add_separator()
+        ops_menu.add_command(label="Открыть карточку терминала",
+                             command=self._open_selected_terminal_card)
+        ops_menu.add_command(label="Открыть карточку мерчанта",
+                             command=self._open_selected_merchant_card)
+        ops_menu.add_command(label="Редактировать выбранный ID...",
+                             command=self._edit_selected_id)
+        ops_menu.add_separator()
+        ops_menu.add_command(label="Закрыть выбранные ID...",
+                             command=self._close_selected_ids)
+        ops_menu.add_command(label="Переместить выбранные терминалы...",
+                             command=self._move_selected_terminals)
         menubar.add_cascade(label="Операции", menu=ops_menu)
 
+        # --- Справочники ---
         refs_menu = tk.Menu(menubar, tearoff=0)
         refs_menu.add_command(label="Мерчанты...", command=self._open_merchants_list)
         refs_menu.add_command(label="Терминалы...", command=self._open_terminals_list)
@@ -122,14 +185,23 @@ class MainWindow(tk.Tk):
         refs_menu.add_command(label="Настройки колонок...", command=self._open_column_settings)
         menubar.add_cascade(label="Справочники", menu=refs_menu)
 
+        # --- Отчёты ---
+        reports_menu = tk.Menu(menubar, tearoff=0)
+        reports_menu.add_command(label="По моделям терминалов...", command=self._open_models_report)
+        reports_menu.add_command(label="Отчёт по клиенту...", command=self._open_selected_merchant_report)
+        menubar.add_cascade(label="Отчёты", menu=reports_menu)
+
+        # --- Администрирование ---
         if self.user["role"] == "admin":
             admin_menu = tk.Menu(menubar, tearoff=0)
             admin_menu.add_command(label="Пользователи...", command=self._open_users_window)
             menubar.add_cascade(label="Администрирование", menu=admin_menu)
 
+        # --- Справка ---
         help_menu = tk.Menu(menubar, tearoff=0)
         help_menu.add_command(label="О программе", command=self._show_about)
         menubar.add_cascade(label="Справка", menu=help_menu)
+
         self.config(menu=menubar)
 
     def _open_users_window(self):
@@ -145,6 +217,244 @@ class MainWindow(tk.Tk):
         dlg = NewIdDialog(self, self.user)
         if dlg.result:
             self._refresh_current_list()
+
+    def _open_models_report(self):
+        from gui.models_report import ModelsReportWindow
+        ModelsReportWindow(self, self.user)
+
+    def _open_merchant_report(self, merchant_id):
+        from gui.merchant_report import MerchantReportWindow
+        MerchantReportWindow(self, self.user, merchant_id)
+
+    # ------------------------------------------------------------------
+    # Действия по выделенной строке (меню верхнее + контекстное)
+    # ------------------------------------------------------------------
+    def _get_single_selection_info(self):
+        """Если выделена ровно одна строка -- возвращает её info. Иначе None."""
+        sel = self.tree.selection()
+        if len(sel) != 1:
+            return None
+        return self._row_by_iid.get(sel[0])
+
+    def _resolve_terminal_id_from_selection(self):
+        """Возвращает terminal_id по выделенной строке (или None)."""
+        info = self._get_single_selection_info()
+        if info is None:
+            return None
+        kind = info[0]
+        if kind == "terminal_node":
+            return info[1]
+        if kind in ("warehouse", "written_off"):
+            return info[1]
+        if kind == "active":
+            with database.get_connection() as conn:
+                d = database.get_terminal_id_detail(conn, info[1])
+            if d:
+                return d.get("terminal_id")
+        return None
+
+    def _resolve_merchant_id_from_selection(self):
+        """Возвращает merchant_id по выделенной строке (или None)."""
+        info = self._get_single_selection_info()
+        if info is None:
+            return None
+        kind = info[0]
+        if kind == "active":
+            with database.get_connection() as conn:
+                d = database.get_terminal_id_detail(conn, info[1])
+            if d:
+                return d.get("merchant_id")
+        if kind in ("terminal_node", "warehouse", "written_off"):
+            # Попробуем определить текущего мерчанта терминала
+            tid = info[1]
+            with database.get_connection() as conn:
+                row = conn.execute("""
+                    SELECT current_merchant_id FROM terminal_current_state WHERE terminal_id = ?
+                """, (tid,)).fetchone()
+            if row and row["current_merchant_id"]:
+                return row["current_merchant_id"]
+            # Иначе — по активному ID
+            with database.get_connection() as conn:
+                row = conn.execute("""
+                    SELECT ti.merchant_id
+                    FROM terminal_id_bindings b
+                    JOIN terminal_ids ti ON ti.id = b.terminal_id_ref
+                    WHERE b.terminal_id = ? AND b.bound_to IS NULL
+                    LIMIT 1
+                """, (tid,)).fetchone()
+            if row:
+                return row["merchant_id"]
+        return None
+
+    def _resolve_terminal_id_ref_from_selection(self):
+        """Возвращает terminal_ids.id (не binding, а саму запись) по выделению."""
+        info = self._get_single_selection_info()
+        if info is None:
+            return None
+        if info[0] == "active":
+            return info[2] if len(info) > 2 else None
+        if info[0] == "epos" and len(info) > 3:
+            return info[3]
+        return None
+
+    def _open_selected_terminal_card(self):
+        tid = self._resolve_terminal_id_from_selection()
+        if tid is None:
+            messagebox.showinfo("Инфо",
+                "Выделите строку терминала или ID, чтобы открыть карточку.",
+                parent=self)
+            return
+        self._open_terminal_card(tid)
+
+    def _open_selected_merchant_card(self):
+        mid = self._resolve_merchant_id_from_selection()
+        if mid is None:
+            messagebox.showinfo("Инфо",
+                "Выделите строку с ID или терминалом, связанным с клиентом.",
+                parent=self)
+            return
+        self._open_merchant_card(mid)
+
+    def _edit_selected_id(self):
+        tid_ref = self._resolve_terminal_id_ref_from_selection()
+        if tid_ref is None:
+            messagebox.showinfo("Инфо",
+                "Выделите строку с платёжным ID, чтобы его редактировать.",
+                parent=self)
+            return
+        self._edit_id(tid_ref)
+
+    def _open_selected_merchant_report(self):
+        mid = self._resolve_merchant_id_from_selection()
+        if mid is None:
+            messagebox.showinfo("Инфо",
+                "Выделите строку с ID или терминалом клиента, чтобы открыть отчёт.",
+                parent=self)
+            return
+        self._open_merchant_report(mid)
+
+    def _export_current_tab(self):
+        from tkinter import filedialog
+        tab_key = self.current_tab
+        default_name = {
+            "active": "Активные",
+            "warehouse": "Склад",
+            "written_off": "Списанные",
+            "epos": "E-POS",
+        }.get(tab_key, "Экспорт") + ".xlsx"
+
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Экспорт в Excel",
+            defaultextension=".xlsx",
+            filetypes=[("Excel файлы", "*.xlsx")],
+            initialfile=default_name,
+        )
+        if not path:
+            return
+        try:
+            export_excel.export_tree_to_xlsx(self.tree, tab_key, path)
+        except Exception as exc:
+            messagebox.showerror("Ошибка экспорта", str(exc), parent=self)
+            return
+        messagebox.showinfo("Готово", f"Файл сохранён:\n{path}", parent=self)
+
+    # ------------------------------------------------------------------
+    # Массовые операции
+    # ------------------------------------------------------------------
+    def _close_selected_ids(self):
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showinfo("Инфо", "Ничего не выделено", parent=self)
+            return
+        binding_ids = []
+        for iid in selection:
+            info = self._row_by_iid.get(iid)
+            if info and info[0] == "active":
+                binding_ids.append(info[1])
+        if not binding_ids:
+            messagebox.showinfo(
+                "Инфо",
+                "Среди выделенных строк нет ни одного активного ID.\n"
+                "Выделите строки с ID (Ctrl+Click, Shift+Click или Ctrl+A).",
+                parent=self,
+            )
+            return
+        if not messagebox.askyesno(
+            "Подтверждение",
+            f"Закрыть {len(binding_ids)} ID у клиента(ов)?\n\n"
+            "ID будут отвязаны от терминалов. Если у какого-то терминала\n"
+            "не останется активных ID -- он автоматически уедет на склад.",
+            parent=self,
+        ):
+            return
+        comment = simpledialog.askstring(
+            "Комментарий", "Комментарий (необязательно):", parent=self
+        ) or None
+
+        closed, moved, skipped = 0, 0, 0
+        with database.get_connection() as conn:
+            for bid in binding_ids:
+                try:
+                    if database.close_terminal_id(conn, bid, self.user["id"], comment=comment):
+                        moved += 1
+                    closed += 1
+                except ValueError:
+                    skipped += 1
+
+        msg = f"Закрыто ID: {closed}"
+        if moved:
+            msg += f"\nТерминалов перемещено на склад: {moved}"
+        if skipped:
+            msg += f"\nПропущено (уже закрыты): {skipped}"
+        messagebox.showinfo("Готово", msg, parent=self)
+        self._refresh_current_list()
+
+    def _move_selected_terminals(self):
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showinfo("Инфо", "Ничего не выделено", parent=self)
+            return
+
+        terminal_ids = set()
+        for iid in selection:
+            info = self._row_by_iid.get(iid)
+            if not info:
+                continue
+            kind = info[0]
+            if kind in ("terminal_node", "warehouse", "written_off"):
+                terminal_ids.add(info[1])
+            elif kind == "active":
+                with database.get_connection() as conn:
+                    d = database.get_terminal_id_detail(conn, info[1])
+                if d and d.get("terminal_id"):
+                    terminal_ids.add(d["terminal_id"])
+
+        if not terminal_ids:
+            messagebox.showinfo(
+                "Инфо",
+                "Не удалось определить терминалы для перемещения.\n"
+                "Выделите строки терминалов или ID.",
+                parent=self,
+            )
+            return
+
+        dlg = MoveTerminalsDialog(self, len(terminal_ids))
+        place = dlg.result
+        if place is None:
+            return
+
+        comment = simpledialog.askstring(
+            "Комментарий", "Комментарий (необязательно):", parent=self
+        ) or None
+
+        with database.get_connection() as conn:
+            for tid in terminal_ids:
+                database.move_terminal(conn, tid, place, self.user["id"], comment=comment)
+
+        messagebox.showinfo("Готово",
+            f"Перемещено терминалов: {len(terminal_ids)}", parent=self)
+        self._refresh_current_list()
 
     def _show_about(self):
         with database.get_connection() as conn:
@@ -204,10 +514,13 @@ class MainWindow(tk.Tk):
         self.detail_frame = ttk.LabelFrame(paned, text="Подробности", padding=10)
         paned.add(self.detail_frame, weight=2)
 
-        self.tree = ttk.Treeview(tree_frame, show="headings", height=24)
+        self.tree = ttk.Treeview(tree_frame, show="headings", height=24,
+                                  selectmode="extended")
         self.tree.pack(fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_select())
         self.tree.bind("<Double-1>", lambda e: self._on_double_click())
+        # Контекстное меню по правому клику
+        self.tree.bind("<Button-3>", self._on_right_click)
         self.tree.tag_configure("group", font=("TkDefaultFont", 9, "bold"), background="#d9e2ef")
         self.tree.tag_configure("terminal", font=("TkDefaultFont", 9, "bold"), background="#eef3f9")
 
@@ -558,10 +871,81 @@ class MainWindow(tk.Tk):
             iid = self.tree.insert("", "end", text="", values=v, tags=("item",))
             self._row_by_iid[iid] = ("written_off", r["terminal_id"], r)
 
+    # ------------------------------------------------------------------
+    # Контекстное меню (правый клик по строке)
+    # ------------------------------------------------------------------
+    def _on_right_click(self, event):
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        if iid not in self.tree.selection():
+            self.tree.selection_set(iid)
+        self._populate_context_menu()
+        try:
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.context_menu.grab_release()
+
+    def _populate_context_menu(self):
+        self.context_menu.delete(0, "end")
+        info = self._get_single_selection_info()
+
+        if info is None:
+            # Множественное выделение -- только групповые операции
+            self.context_menu.add_command(label="Закрыть выбранные ID...",
+                                          command=self._close_selected_ids)
+            self.context_menu.add_command(label="Переместить выбранные терминалы...",
+                                          command=self._move_selected_terminals)
+            return
+
+        kind = info[0]
+        if kind == "active":
+            self.context_menu.add_command(label="Редактировать ID...",
+                                          command=self._edit_selected_id)
+            self.context_menu.add_command(label="Закрыть ID",
+                                          command=lambda: self._close_active(info[1]))
+            self.context_menu.add_separator()
+            self.context_menu.add_command(label="Карточка терминала",
+                                          command=self._open_selected_terminal_card)
+            self.context_menu.add_command(label="Карточка мерчанта",
+                                          command=self._open_selected_merchant_card)
+            self.context_menu.add_separator()
+            self.context_menu.add_command(label="Отчёт по клиенту...",
+                                          command=self._open_selected_merchant_report)
+        elif kind == "terminal_node":
+            self.context_menu.add_command(label="Карточка терминала",
+                                          command=self._open_selected_terminal_card)
+            self.context_menu.add_command(label="Карточка мерчанта",
+                                          command=self._open_selected_merchant_card)
+            self.context_menu.add_separator()
+            self.context_menu.add_command(label="Отчёт по клиенту...",
+                                          command=self._open_selected_merchant_report)
+        elif kind in ("warehouse", "written_off"):
+            self.context_menu.add_command(label="Карточка терминала",
+                                          command=self._open_selected_terminal_card)
+            self.context_menu.add_separator()
+            self.context_menu.add_command(label="Переместить терминал...",
+                                          command=self._move_selected_terminals)
+        elif kind == "type_node":
+            self.context_menu.add_command(label="Закрыть выбранные ID...",
+                                          command=self._close_selected_ids)
+        elif kind == "epos":
+            self.context_menu.add_command(label="Карточка терминала",
+                                          command=self._open_selected_terminal_card)
+            if info[1]:
+                self.context_menu.add_command(label="Редактировать ID...",
+                                              command=self._edit_selected_id)
+
+    # ------------------------------------------------------------------
+    # Обработка выбора
+    # ------------------------------------------------------------------
     def _on_select(self):
         selection = self.tree.selection()
         if not selection:
             self._clear_detail()
+            return
+        if len(selection) > 1:
+            self._show_multi_selection_summary(selection)
             return
         info = self._row_by_iid.get(selection[0])
         if info is None:
@@ -579,6 +963,26 @@ class MainWindow(tk.Tk):
         elif kind == "written_off":
             self._show_written_off_detail(info[1], info[2])
 
+    def _show_multi_selection_summary(self, selection):
+        n_active = 0
+        n_terminals = set()
+        for iid in selection:
+            info = self._row_by_iid.get(iid)
+            if not info:
+                continue
+            if info[0] == "active":
+                n_active += 1
+            elif info[0] in ("terminal_node", "warehouse", "written_off"):
+                n_terminals.add(info[1])
+        fields = [
+            ("Выделено строк", str(len(selection))),
+            ("Активных ID", str(n_active)),
+            ("Уникальных терминалов", str(len(n_terminals))),
+            ("", ""),
+            ("Действия", "Правый клик по строке или меню «Операции»"),
+        ]
+        self._show_detail(fields, [])
+
     def _on_double_click(self):
         selection = self.tree.selection()
         if not selection:
@@ -588,7 +992,6 @@ class MainWindow(tk.Tk):
             return
         kind = info[0]
         if kind == "active":
-            # Двойной клик по активному ID -- редактировать сам ID
             if len(info) > 2 and info[2]:
                 self._edit_id(info[2])
                 return
@@ -642,16 +1045,10 @@ class MainWindow(tk.Tk):
             ("Расчётный счёт", d["settlement_account"]),
             ("Дата установки", d.get("install_date")),
             ("Дата выдачи", d.get("issue_date")),
+            ("", ""),
+            ("Действия", "Правый клик по строке или меню «Операции» / «Отчёты»"),
         ]
-        tid_ref = d.get("terminal_id_ref") or terminal_id_ref
-        actions = [
-            ("Редактировать ID", lambda: self._edit_id(tid_ref)),
-            ("Карточка терминала", lambda: self._open_terminal_card(d["terminal_id"])),
-            ("Карточка мерчанта", lambda: self._open_merchant_card(d["merchant_id"])),
-        ]
-        if self.current_tab == "active":
-            actions.insert(0, ("Закрыть ID", lambda: self._close_active(binding_id)))
-        self._show_detail(fields, actions)
+        self._show_detail(fields, [])
 
     def _edit_id(self, terminal_id_ref):
         if not terminal_id_ref:
@@ -676,9 +1073,10 @@ class MainWindow(tk.Tk):
             ("Место", PLACE_LABELS.get(d["current_place"], d["current_place"])),
             ("Состояние", CONDITION_LABELS.get(d["condition"], d["condition"])),
             ("Активных ID", str(len(active_ids))),
+            ("", ""),
+            ("Действия", "Правый клик по строке или меню «Операции» / «Отчёты»"),
         ]
-        actions = [("Карточка терминала", lambda: self._open_terminal_card(terminal_id))]
-        self._show_detail(fields, actions)
+        self._show_detail(fields, [])
 
     def _show_warehouse_detail(self, terminal_id, row):
         place_text = PLACE_LABELS.get(row["current_place"], row["current_place"])
@@ -691,9 +1089,10 @@ class MainWindow(tk.Tk):
             ("Кем перемещён", row["moved_by_name"]),
             ("Когда", row["last_moved_at"]),
             ("Комментарий", row["last_comment"]),
+            ("", ""),
+            ("Действия", "Правый клик по строке или меню «Операции»"),
         ]
-        actions = [("Карточка терминала", lambda: self._open_terminal_card(terminal_id))]
-        self._show_detail(fields, actions)
+        self._show_detail(fields, [])
 
     def _show_written_off_detail(self, terminal_id, row):
         fields = [
@@ -704,9 +1103,10 @@ class MainWindow(tk.Tk):
             ("Причина", row["reason"]),
             ("Комментарий", row["comment"]),
             ("Кто списал", row["approved_by_name"]),
+            ("", ""),
+            ("Действия", "Правый клик по строке или меню «Операции»"),
         ]
-        actions = [("Карточка терминала", lambda: self._open_terminal_card(terminal_id))]
-        self._show_detail(fields, actions)
+        self._show_detail(fields, [])
 
     def _close_active(self, binding_id):
         if not messagebox.askyesno("Подтверждение", "Закрыть этот ID у клиента?", parent=self):
@@ -733,7 +1133,7 @@ class MainWindow(tk.Tk):
     def _remember_selection(self):
         self._pending_restore = None
         sel = self.tree.selection()
-        if sel:
+        if sel and len(sel) == 1:
             info = self._row_by_iid.get(sel[0])
             if info:
                 self._pending_restore = info[:2]

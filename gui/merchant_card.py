@@ -73,6 +73,7 @@ class MerchantCard(tk.Toplevel):
         ttk.Button(btns, text="Сохранить", command=self._save).pack(side="left", padx=2)
         ttk.Button(btns, text="Сохранить адрес/телефон", command=self._save_contact).pack(side="left", padx=2)
         ttk.Button(btns, text="Добавить ID...", command=self._add_id).pack(side="left", padx=2)
+        ttk.Button(btns, text="Отчёт по клиенту...", command=self._open_report).pack(side="left", padx=2)
         ttk.Button(btns, text="Закрыть обслуживание", command=lambda: self._set_status("closed")).pack(
             side="left", padx=2
         )
@@ -125,7 +126,10 @@ class MerchantCard(tk.Toplevel):
         contact = data["current_contact"] or {}
         self.address_var.set(contact.get("address") or "")
         self.phone_var.set(contact.get("phone") or "")
-        self.status_label.config(text=f"Текущий статус: {data['current_status'] or 'не установлен'}")
+
+        st = data["current_status"]
+        status_text = "закрыт" if st == "closed" else "активен"
+        self.status_label.config(text=f"Текущий статус: {status_text}")
 
         self.ids_tree.delete(*self.ids_tree.get_children())
         for r in data["terminal_ids"]:
@@ -155,6 +159,7 @@ class MerchantCard(tk.Toplevel):
                 self.phone_var.get() or None, self.user["id"],
             )
         self._load()
+        messagebox.showinfo("Готово", "Адрес/телефон сохранены", parent=self)
 
     def _add_id(self):
         if self.read_only:
@@ -163,6 +168,10 @@ class MerchantCard(tk.Toplevel):
         dlg = NewIdDialog(self, self.user, prefill_m_id=m_id)
         if dlg.result:
             self._load()
+
+    def _open_report(self):
+        from gui.merchant_report import MerchantReportWindow
+        MerchantReportWindow(self, self.user, self.merchant_id)
 
     def _set_status(self, status):
         if self.read_only:

@@ -1,12 +1,12 @@
 {
   "active": {
     "widths": {
-      "#0": 427,
-      "point": 345,
-      "address": 275,
-      "phone": 146,
-      "own": 200,
-      "owner": 285
+      "#0": 429,
+      "point": 348,
+      "address": 277,
+      "phone": 148,
+      "own": 202,
+      "owner": 287
     },
     "visible": [
       "point",

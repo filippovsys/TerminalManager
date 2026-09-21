@@ -31,3 +31,8 @@ dist/
 Thumbs.db
 Desktop.ini
 !data/terminals.db
+_archive/
+__pycache__/
+*.pyc
+data/*.backup-*
+*.db.backup*

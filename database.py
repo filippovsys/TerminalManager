@@ -68,11 +68,14 @@ _SCHEMA_UPGRADES = {
 
 
 def ensure_schema_upgrades(conn):
+    # 1. ALTER TABLE -- недостающие колонки
     for table, columns in _SCHEMA_UPGRADES.items():
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
         for col_name, col_type in columns.items():
             if col_name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}")
+
+    # 2. Служебные таблицы версий
     if not _table_exists(conn, "app_version_log"):
         conn.execute(
             "CREATE TABLE app_version_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -95,6 +98,32 @@ def ensure_schema_upgrades(conn):
             "UPDATE schema_version SET version = ?, applied_at = datetime('now') WHERE id = 1",
             (config.SCHEMA_VERSION,),
         )
+
+    # 3. Пересоздаём VIEW terminal_current_state (убрано awaiting_firmware)
+    conn.execute("DROP VIEW IF EXISTS terminal_current_state")
+    conn.execute("""
+        CREATE VIEW terminal_current_state AS
+        SELECT
+            t.id AS terminal_id,
+            t.serial_number,
+            (SELECT p.place_type FROM terminal_placements p
+                WHERE p.terminal_id = t.id
+                ORDER BY p.moved_at DESC, p.id DESC LIMIT 1) AS current_place,
+            (SELECT p.merchant_id FROM terminal_placements p
+                WHERE p.terminal_id = t.id
+                ORDER BY p.moved_at DESC, p.id DESC LIMIT 1) AS current_merchant_id,
+            CASE
+                WHEN EXISTS (SELECT 1 FROM terminal_writeoffs w WHERE w.terminal_id = t.id)
+                    THEN 'written_off'
+                WHEN EXISTS (SELECT 1 FROM terminal_repairs r
+                              WHERE r.terminal_id = t.id
+                                AND r.sent_at IS NOT NULL
+                                AND r.returned_at IS NULL)
+                    THEN 'in_repair'
+                ELSE 'normal'
+            END AS condition
+        FROM terminals t
+    """)
 
 
 def _table_exists(conn, table_name):
@@ -360,6 +389,26 @@ def list_all_merchants(conn, query=None, limit=1000):
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
+def list_merchants_for_combo(conn, query=None, limit=500):
+    """Список мерчантов для выпадающего списка: (id, m_id, owner_label, merchant_type)."""
+    sql = """
+        SELECT m.id, m.m_id, m.merchant_type,
+               (SELECT ti.owner_label FROM terminal_ids ti
+                WHERE ti.merchant_id = m.id
+                ORDER BY ti.id DESC LIMIT 1) AS owner_label
+        FROM merchants m
+        WHERE 1=1
+    """
+    params = []
+    if query:
+        q = f"%{query.lower()}%"
+        sql += " AND (PYLOWER(m.m_id) LIKE ? OR PYLOWER(m.note) LIKE ?)"
+        params += [q, q]
+    sql += " ORDER BY m.merchant_type, m.m_id LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
 def get_merchant(conn, merchant_id):
     merchant = conn.execute("SELECT * FROM merchants WHERE id = ?", (merchant_id,)).fetchone()
     if merchant is None:
@@ -375,13 +424,162 @@ def get_merchant(conn, merchant_id):
         "ORDER BY valid_from DESC LIMIT 1",
         (merchant_id,),
     ).fetchone()
+
+    # Контакт: если в merchant_contact_history пусто -- берём из последнего ID,
+    # где заполнены address/phone. Так после импорта из Excel карточка мерчанта
+    # показывает данные сразу.
+    contact_dict = dict(contact) if contact else None
+    if contact_dict is None or (not contact_dict.get("address") and not contact_dict.get("phone")):
+        for r in terminal_ids:
+            addr = r["address"]
+            ph = r["phone"]
+            if addr or ph:
+                if contact_dict is None:
+                    contact_dict = {
+                        "id": None,
+                        "merchant_id": merchant_id,
+                        "address": addr,
+                        "phone": ph,
+                        "valid_from": None,
+                        "valid_to": None,
+                        "changed_by": None,
+                    }
+                else:
+                    if not contact_dict.get("address"):
+                        contact_dict["address"] = addr
+                    if not contact_dict.get("phone"):
+                        contact_dict["phone"] = ph
+                if contact_dict.get("address") and contact_dict.get("phone"):
+                    break
+
+    status = status_row["current_status"] if status_row else None
+
+    return {
+        "merchant": dict(merchant),
+        "current_status": status,
+        "current_contact": contact_dict,
+        "terminal_ids": [dict(r) for r in terminal_ids],
+    }
+
+def get_merchant_full_report(conn, merchant_id):
+    """Полный отчёт по мерчанту: сводка, ID, терминалы, история."""
+    merchant = conn.execute("SELECT * FROM merchants WHERE id = ?", (merchant_id,)).fetchone()
+    if merchant is None:
+        return None
+
+    status_row = conn.execute(
+        "SELECT current_status FROM merchant_current_status WHERE merchant_id = ?", (merchant_id,)
+    ).fetchone()
+    contact = conn.execute(
+        "SELECT * FROM merchant_contact_history WHERE merchant_id = ? AND valid_to IS NULL "
+        "ORDER BY valid_from DESC LIMIT 1",
+        (merchant_id,),
+    ).fetchone()
+
+    # Все ID этого мерчанта
+    all_ids_rows = conn.execute("""
+        SELECT ti.id, ti.payment_id, ti.owner_label, ti.point_label,
+               ti.address, ti.phone, ti.transit_account, ti.settlement_account,
+               ti.install_date, ti.issue_date, ti.note
+        FROM terminal_ids ti
+        WHERE ti.merchant_id = ?
+        ORDER BY ti.id DESC
+    """, (merchant_id,)).fetchall()
+
+    id_details = []
+    active_terminals = {}
+
+    for r in all_ids_rows:
+        bindings = conn.execute("""
+            SELECT b.id AS binding_id, b.bound_from, b.bound_to,
+                   t.id AS terminal_id, t.serial_number, t.model, t.ownership
+            FROM terminal_id_bindings b
+            JOIN terminals t ON t.id = b.terminal_id
+            WHERE b.terminal_id_ref = ?
+            ORDER BY b.id DESC
+        """, (r["id"],)).fetchall()
+        bindings_dicts = [dict(x) for x in bindings]
+        active_b = next((x for x in bindings_dicts if x["bound_to"] is None), None)
+        status = "active" if active_b else "closed"
+        entry = dict(r)
+        entry["status"] = status
+        entry["active_terminal_id"] = active_b["terminal_id"] if active_b else None
+        entry["active_terminal_sn"] = active_b["serial_number"] if active_b else None
+        entry["bindings"] = bindings_dicts
+        id_details.append(entry)
+
+        if active_b:
+            tid = active_b["terminal_id"]
+            active_terminals.setdefault(tid, {
+                "terminal_id": tid,
+                "serial_number": active_b["serial_number"],
+                "model": active_b["model"],
+                "ownership": active_b["ownership"],
+                "ids": [],
+            })["ids"].append(entry)
+
+    # Все уникальные терминалы, с которыми был связан любой ID мерчанта
+    all_tids = set()
+    for r in id_details:
+        for b in r["bindings"]:
+            all_tids.add(b["terminal_id"])
+
+    terminals_info = []
+    for tid in all_tids:
+        t = conn.execute(
+            "SELECT id, serial_number, model, ownership FROM terminals WHERE id = ?", (tid,)
+        ).fetchone()
+        if t is None:
+            continue
+        state = conn.execute(
+            "SELECT current_place, condition FROM terminal_current_state WHERE terminal_id = ?",
+            (tid,),
+        ).fetchone()
+        active_cnt = conn.execute("""
+            SELECT COUNT(*) c FROM terminal_id_bindings b
+            JOIN terminal_ids ti ON ti.id = b.terminal_id_ref
+            WHERE b.terminal_id = ? AND b.bound_to IS NULL AND ti.merchant_id = ?
+        """, (tid, merchant_id)).fetchone()["c"]
+        terminals_info.append({
+            "terminal_id": tid,
+            "serial_number": t["serial_number"],
+            "model": t["model"],
+            "ownership": t["ownership"],
+            "current_place": state["current_place"] if state else None,
+            "condition": state["condition"] if state else None,
+            "active_ids": active_cnt,
+        })
+    terminals_info.sort(key=lambda x: (x["serial_number"] or "zzz"))
+
+    active_ids_count = sum(1 for r in id_details if r["status"] == "active")
+
+    # Audit log по этому мерчанту
+    history = conn.execute("""
+        SELECT a.*, u.full_name AS user_name
+        FROM audit_log a
+        LEFT JOIN users u ON u.id = a.user_id
+        WHERE (a.entity_type = 'merchant' AND a.entity_id = ?)
+           OR (a.entity_type = 'terminal_id' AND a.entity_id IN (
+               SELECT id FROM terminal_ids WHERE merchant_id = ?
+           ))
+        ORDER BY a.changed_at DESC LIMIT 300
+    """, (merchant_id, merchant_id)).fetchall()
+
     return {
         "merchant": dict(merchant),
         "current_status": status_row["current_status"] if status_row else None,
         "current_contact": dict(contact) if contact else None,
-        "terminal_ids": [dict(r) for r in terminal_ids],
+        "stats": {
+            "terminals_total": len(terminals_info),
+            "terminals_active": len(active_terminals),
+            "ids_total": len(id_details),
+            "ids_active": active_ids_count,
+        },
+        "active_terminals": list(active_terminals.values()),
+        "all_ids": id_details,
+        "terminals": terminals_info,
+        "history": [dict(r) for r in history],
     }
-
 
 def create_merchant(conn, m_id, merchant_type, user_id, note=None):
     cur = conn.execute(
@@ -581,6 +779,15 @@ def move_terminal(conn, terminal_id, place_type, user_id, merchant_id=None, comm
 # Платёжные ID и привязки
 # =============================================================================
 
+def create_terminal_id(conn, payment_id, transit_account, merchant_id, owner_label, point_label):
+    cur = conn.execute(
+        "INSERT INTO terminal_ids (payment_id, transit_account, merchant_id, owner_label, point_label) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (payment_id, transit_account, merchant_id, owner_label, point_label),
+    )
+    return cur.lastrowid
+
+
 def update_terminal_id_fields(conn, terminal_id_ref, user_id, **fields):
     """Обновляет поля конкретной записи terminal_ids с аудитом."""
     allowed = {"transit_account", "settlement_account", "owner_label", "point_label",
@@ -673,7 +880,6 @@ def write_off_terminal(conn, terminal_id, reason, user, comment=None):
     ).fetchone()
     if existing is not None:
         raise ValueError("Этот терминал уже списан -- повторное списание невозможно")
-    # Закрываем все активные привязки списываемого терминала
     conn.execute(
         "UPDATE terminal_id_bindings SET bound_to = datetime('now') "
         "WHERE terminal_id = ? AND bound_to IS NULL",
@@ -795,8 +1001,6 @@ def get_terminal_id_detail(conn, binding_id):
 
 
 def get_active_dashboard_stats(conn):
-    """Сводка по вкладке "Активные": сколько ID и сколько уникальных
-    физических терминалов по каждому типу клиента."""
     rows_ids = conn.execute(
         """
         SELECT m.merchant_type, COUNT(*) c
@@ -954,3 +1158,121 @@ def get_distinct_models(conn):
 def get_distinct_ownerships(conn):
     rows = conn.execute("SELECT DISTINCT ownership FROM terminals ORDER BY ownership").fetchall()
     return [r["ownership"] for r in rows]
+
+
+def get_models_report(conn):
+    """Сводка по моделям терминалов: количество терминалов и их распределение.
+
+    Возвращает список dict'ов, по одному на модель:
+      {
+        "model": "Ingenico ICT220",
+        "terminals_total": 42,
+        "active_ids": 87,
+        "place_merchant": 30,
+        "place_warehouse": 8,
+        "place_repair_shop": 2,
+        "place_none": 2,          # без записи в placements
+        "cond_normal": 38,
+        "cond_in_repair": 2,
+        "cond_written_off": 2,
+        "own_bank": 40,
+        "own_client": 2,
+        "clients_bank": 5,        # у скольких терминалов этой модели активный ID у банка
+        "clients_edara": 12,
+        "clients_telekeci": 20,
+        "clients_other": 0,
+        "epos": 0,
+      }
+    """
+    models = conn.execute(
+        "SELECT DISTINCT model FROM terminals WHERE model IS NOT NULL AND model != '' ORDER BY model"
+    ).fetchall()
+
+    result = []
+    for mrow in models:
+        model = mrow["model"]
+
+        # Терминалы этой модели
+        term_rows = conn.execute("""
+            SELECT t.id, t.ownership, t.is_epos,
+                   s.current_place, s.condition
+            FROM terminals t
+            LEFT JOIN terminal_current_state s ON s.terminal_id = t.id
+            WHERE t.model = ?
+        """, (model,)).fetchall()
+
+        entry = {
+            "model": model,
+            "terminals_total": len(term_rows),
+            "active_ids": 0,
+            "place_merchant": 0,
+            "place_warehouse": 0,
+            "place_repair_shop": 0,
+            "place_none": 0,
+            "cond_normal": 0,
+            "cond_in_repair": 0,
+            "cond_written_off": 0,
+            "own_bank": 0,
+            "own_client": 0,
+            "clients_bank": 0,
+            "clients_edara": 0,
+            "clients_telekeci": 0,
+            "clients_other": 0,
+            "epos": 0,
+        }
+
+        for t in term_rows:
+            place = t["current_place"] or "none"
+            cond = t["condition"] or "normal"
+            own = t["ownership"] or "bank"
+
+            if place == "merchant":
+                entry["place_merchant"] += 1
+            elif place == "warehouse":
+                entry["place_warehouse"] += 1
+            elif place == "repair_shop":
+                entry["place_repair_shop"] += 1
+            else:
+                entry["place_none"] += 1
+
+            if cond == "in_repair":
+                entry["cond_in_repair"] += 1
+            elif cond == "written_off":
+                entry["cond_written_off"] += 1
+            else:
+                entry["cond_normal"] += 1
+
+            if own == "client":
+                entry["own_client"] += 1
+            else:
+                entry["own_bank"] += 1
+
+            if t["is_epos"]:
+                entry["epos"] += 1
+
+        # Активные ID + типы клиентов для этой модели
+        id_rows = conn.execute("""
+            SELECT m.merchant_type
+            FROM terminal_id_bindings b
+            JOIN terminal_ids ti ON ti.id = b.terminal_id_ref
+            JOIN terminals t ON t.id = b.terminal_id
+            JOIN merchants m ON m.id = ti.merchant_id
+            WHERE b.bound_to IS NULL AND t.model = ?
+        """, (model,)).fetchall()
+        entry["active_ids"] = len(id_rows)
+        for r in id_rows:
+            mt = r["merchant_type"]
+            if mt == "bank":
+                entry["clients_bank"] += 1
+            elif mt == "edara":
+                entry["clients_edara"] += 1
+            elif mt == "telekeci":
+                entry["clients_telekeci"] += 1
+            else:
+                entry["clients_other"] += 1
+
+        result.append(entry)
+
+    # Сортируем по количеству терминалов (убывание)
+    result.sort(key=lambda x: -x["terminals_total"])
+    return result

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Диалог ремонта: отправить / вернуть / прошить.
-Позволяет редактировать любой ремонт терминала или создавать новый."""
+"""Диалог ремонта: отправить / вернуть.
+Позволяет редактировать любой ремонт терминала или создавать новый.
+Состояние терминала: "in_repair" -- пока returned_at пусто, иначе "normal"."""
 
 import re
 import tkinter as tk
@@ -36,12 +37,12 @@ class RepairDialog(tk.Toplevel):
         self.terminal_id = terminal_id
         self.repair_id = repair_id
         self.result = False
-        self.existing = None  # текущий dict из БД
+        self.existing = None
 
         self.title("Ремонт терминала")
         self.resizable(False, False)
 
-        # Если repair_id не задан -- ищем активный ремонт
+        # Если repair_id не задан -- ищем активный ремонт (нет returned_at)
         if self.repair_id is None:
             with database.get_connection() as conn:
                 row = conn.execute(
@@ -65,7 +66,6 @@ class RepairDialog(tk.Toplevel):
         outer = ttk.Frame(self, padding=12)
         outer.pack(fill="both", expand=True)
 
-        # Заголовок статуса
         self.status_label = ttk.Label(outer, text="", font=("TkDefaultFont", 10, "bold"))
         self.status_label.pack(anchor="w", pady=(0, 8))
 
@@ -82,33 +82,32 @@ class RepairDialog(tk.Toplevel):
         self.reported_var = tk.StringVar()
         self.sent_var = tk.StringVar()
         self.returned_var = tk.StringVar()
-        self.firmware_var = tk.StringVar()
 
         ttk.Label(dates, text="Сообщено:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(dates, textvariable=self.reported_var, width=14).grid(row=0, column=1, sticky="w", padx=(4, 0))
-        ttk.Label(dates, text="(ГГГГ-ММ-ДД)", foreground="gray").grid(row=0, column=2, sticky="w", padx=(6, 0))
+        ttk.Entry(dates, textvariable=self.reported_var, width=14).grid(
+            row=0, column=1, sticky="w", padx=(4, 0))
+        ttk.Label(dates, text="(ГГГГ-ММ-ДД)", foreground="gray").grid(
+            row=0, column=2, sticky="w", padx=(6, 0))
 
         ttk.Label(dates, text="Отправлен:").grid(row=1, column=0, sticky="w", pady=(4, 0))
-        ttk.Entry(dates, textvariable=self.sent_var, width=14).grid(row=1, column=1, sticky="w", padx=(4, 0), pady=(4, 0))
+        ttk.Entry(dates, textvariable=self.sent_var, width=14).grid(
+            row=1, column=1, sticky="w", padx=(4, 0), pady=(4, 0))
         ttk.Button(dates, text="Отправить сегодня", command=self._set_sent_today).grid(
             row=1, column=2, sticky="w", padx=(6, 0), pady=(4, 0))
 
         ttk.Label(dates, text="Вернулся:").grid(row=2, column=0, sticky="w", pady=(4, 0))
-        ttk.Entry(dates, textvariable=self.returned_var, width=14).grid(row=2, column=1, sticky="w", padx=(4, 0), pady=(4, 0))
+        ttk.Entry(dates, textvariable=self.returned_var, width=14).grid(
+            row=2, column=1, sticky="w", padx=(4, 0), pady=(4, 0))
         ttk.Button(dates, text="Вернулся сегодня", command=self._set_returned_today).grid(
             row=2, column=2, sticky="w", padx=(6, 0), pady=(4, 0))
 
-        ttk.Label(dates, text="Прошит:").grid(row=3, column=0, sticky="w", pady=(4, 0))
-        ttk.Entry(dates, textvariable=self.firmware_var, width=14).grid(row=3, column=1, sticky="w", padx=(4, 0), pady=(4, 0))
-        ttk.Button(dates, text="Прошит сегодня", command=self._set_firmware_today).grid(
-            row=3, column=2, sticky="w", padx=(6, 0), pady=(4, 0))
-
-        # Результат и комментарий
+        # Результат
         res_frame = ttk.LabelFrame(outer, text="Результат", padding=8)
         res_frame.pack(fill="x", pady=(0, 8))
         self.result_var = tk.StringVar()
         ttk.Entry(res_frame, textvariable=self.result_var, width=60).pack(fill="x")
 
+        # Комментарий
         com_frame = ttk.LabelFrame(outer, text="Комментарий", padding=8)
         com_frame.pack(fill="x", pady=(0, 8))
         self.comment_var = tk.StringVar()
@@ -127,9 +126,6 @@ class RepairDialog(tk.Toplevel):
     def _set_returned_today(self):
         self.returned_var.set(date.today().isoformat())
 
-    def _set_firmware_today(self):
-        self.firmware_var.set(date.today().isoformat())
-
     def _load(self):
         with database.get_connection() as conn:
             if self.repair_id:
@@ -145,7 +141,6 @@ class RepairDialog(tk.Toplevel):
                 self.reported_var.set(row["reported_at"] or "")
                 self.sent_var.set(row["sent_at"] or "")
                 self.returned_var.set(row["returned_at"] or "")
-                self.firmware_var.set(row["firmware_at"] or "")
                 self.result_var.set(row["result"] or "")
                 self.comment_var.set(row["comment"] or "")
                 self.status_label.config(text="Существующий ремонт (редактирование)")
@@ -155,7 +150,6 @@ class RepairDialog(tk.Toplevel):
                 self.reported_var.set(date.today().isoformat())
                 self.sent_var.set("")
                 self.returned_var.set("")
-                self.firmware_var.set("")
                 self.result_var.set("")
                 self.comment_var.set("")
                 self.status_label.config(text="Новый ремонт")
@@ -165,7 +159,6 @@ class RepairDialog(tk.Toplevel):
         reported = parse_date(self.reported_var.get())
         sent = parse_date(self.sent_var.get())
         returned = parse_date(self.returned_var.get())
-        firmware = parse_date(self.firmware_var.get())
         result = self.result_var.get().strip() or None
         comment = self.comment_var.get().strip() or None
 
@@ -186,11 +179,9 @@ class RepairDialog(tk.Toplevel):
                         reported_at=reported, sent_at=sent,
                     )
                     self.repair_id = new_id
-                    # Обновляем остальные поля (result/comment/firmware/returned)
                     database.update_repair(
                         conn, new_id, self.user["id"],
                         returned_at=returned,
-                        firmware_at=firmware,
                         result=result,
                         comment=comment,
                     )
@@ -200,21 +191,14 @@ class RepairDialog(tk.Toplevel):
                             conn, self.terminal_id, "repair_shop", self.user["id"],
                             comment=f"ремонт: {reason or '—'}",
                         )
-                    # Если вернулся, но НЕ прошит -- на склад
-                    if returned and not firmware:
+                    # Если сразу вернулся -- на склад
+                    if returned:
                         database.move_terminal(
                             conn, self.terminal_id, "warehouse", self.user["id"],
-                            comment="вернулся из ремонта, ждёт прошивку",
-                        )
-                    # Если прошит -- на склад (пользователь потом сам переместит)
-                    if firmware:
-                        database.move_terminal(
-                            conn, self.terminal_id, "warehouse", self.user["id"],
-                            comment="прошит после ремонта",
+                            comment="вернулся из ремонта",
                         )
                 else:
                     was_returned = self.existing["returned_at"]
-                    was_firmware = self.existing["firmware_at"]
 
                     database.update_repair(
                         conn, self.repair_id, self.user["id"],
@@ -222,7 +206,6 @@ class RepairDialog(tk.Toplevel):
                         reported_at=reported,
                         sent_at=sent,
                         returned_at=returned,
-                        firmware_at=firmware,
                         result=result,
                         comment=comment,
                     )
@@ -232,12 +215,6 @@ class RepairDialog(tk.Toplevel):
                         database.move_terminal(
                             conn, self.terminal_id, "warehouse", self.user["id"],
                             comment="вернулся из ремонта",
-                        )
-                    # Если дата прошивки только что появилась -- на склад (потом сами перенесут)
-                    if firmware and not was_firmware:
-                        database.move_terminal(
-                            conn, self.terminal_id, "warehouse", self.user["id"],
-                            comment="прошит после ремонта",
                         )
         except Exception as exc:
             messagebox.showerror("Ошибка", str(exc), parent=self)

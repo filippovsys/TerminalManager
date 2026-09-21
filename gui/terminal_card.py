@@ -12,6 +12,11 @@ from gui.repair_dialog import RepairDialog
 
 
 PLACE_LABELS = {"merchant": "У клиента", "warehouse": "Склад", "repair_shop": "Мастерская"}
+CONDITION_LABELS = {
+    "normal": "Норма",
+    "in_repair": "В ремонте",
+    "written_off": "Списан",
+}
 
 
 class MoveDialog(tk.Toplevel):
@@ -167,10 +172,9 @@ class TerminalCard(tk.Toplevel):
                                           {"place_type": "Место", "m_id": "M/id",
                                            "moved_at": "Когда", "comment": "Комментарий"})
         self.repair_tree = self._make_tab(notebook, "Ремонты",
-                                           ("reason", "sent_at", "returned_at", "firmware_at", "result"),
+                                           ("reason", "sent_at", "returned_at", "result"),
                                            {"reason": "Причина", "sent_at": "Отправлен",
-                                            "returned_at": "Вернулся", "firmware_at": "Прошит",
-                                            "result": "Результат"})
+                                            "returned_at": "Вернулся", "result": "Результат"})
         self.repair_tree.bind("<Double-1>", self._edit_repair_by_dbl)
 
         if self.read_only:
@@ -206,7 +210,7 @@ class TerminalCard(tk.Toplevel):
         self.note_var.set(t["note"] or "")
         self.state_label.config(
             text=f"Место: {PLACE_LABELS.get(data['current_place'], data['current_place'])}   "
-                 f"Состояние: {data['condition']}"
+                 f"Состояние: {CONDITION_LABELS.get(data['condition'], data['condition'])}"
         )
 
         self.ids_tree.delete(*self.ids_tree.get_children())
@@ -248,7 +252,7 @@ class TerminalCard(tk.Toplevel):
         for r in data["repairs"]:
             iid = self.repair_tree.insert("", "end", values=(
                 r["reason"] or "", r["sent_at"] or "", r["returned_at"] or "",
-                r["firmware_at"] or "", r["result"] or "",
+                r["result"] or "",
             ))
             self._repair_ids_by_iid[iid] = r["id"]
 
