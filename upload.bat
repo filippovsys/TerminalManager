@@ -286,6 +286,29 @@ if errorlevel 1 (
     exit /b 7
 )
 
+REM ------------------------------------------------------------
+REM Тег версии приложения (берём из config.py)
+REM ------------------------------------------------------------
+for /f "delims=" %%V in ('python -c "import config; print(config.APP_VERSION)" 2^>nul') do set "APP_VER=%%V"
+
+if not "!APP_VER!"=="" (
+    echo.
+    echo Создание тега v!APP_VER!...
+    git tag -a "v!APP_VER!" -m "Release v!APP_VER!: !MESSAGE!" 2>nul
+    if errorlevel 1 (
+        echo [INFO] Тег v!APP_VER! уже существует или не удалось создать.
+    ) else (
+        git push origin "v!APP_VER!"
+        if errorlevel 1 (
+            echo [WARN] Тег создан, но не отправлен на GitHub.
+        ) else (
+            echo [OK] Тег v!APP_VER! отправлен на GitHub.
+        )
+    )
+) else (
+    echo [WARN] Не удалось прочитать APP_VERSION из config.py -- тег не создан.
+)
+
 echo.
 echo ============================================================
 echo                    UPLOAD COMPLETED

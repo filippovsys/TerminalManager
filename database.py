@@ -5,6 +5,9 @@ database.py -- слой доступа к данным HalkTerminalManager.
 Все функции (кроме get_connection/init_db) принимают уже открытое
 соединение `conn` первым аргументом -- это позволяет GUI объединять
 несколько операций в одну транзакцию.
+
+Поиск регистронезависимый для Unicode (в т.ч. кириллицы) -- за счёт
+регистрации SQL-функции PYLOWER (см. sqlite3_connect).
 """
 
 import binascii
@@ -38,6 +41,8 @@ def sqlite3_connect():
     conn = sqlite3.connect(config.DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # PYLOWER: правильно понимает кириллицу (встроенный LIKE -- нет)
+    conn.create_function("PYLOWER", 1, lambda x: x.lower() if x is not None else None)
     return conn
 
 
@@ -72,6 +77,23 @@ def ensure_schema_upgrades(conn):
         conn.execute(
             "CREATE TABLE app_version_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "version TEXT NOT NULL UNIQUE, installed_at TEXT NOT NULL DEFAULT (datetime('now')), notes TEXT)"
+        )
+    if not _table_exists(conn, "schema_version"):
+        conn.execute(
+            "CREATE TABLE schema_version ("
+            "id INTEGER PRIMARY KEY CHECK (id = 1), "
+            "version INTEGER NOT NULL, "
+            "applied_at TEXT NOT NULL DEFAULT (datetime('now'))"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO schema_version (id, version) VALUES (1, ?)",
+            (config.SCHEMA_VERSION,),
+        )
+    else:
+        conn.execute(
+            "UPDATE schema_version SET version = ?, applied_at = datetime('now') WHERE id = 1",
+            (config.SCHEMA_VERSION,),
         )
 
 
@@ -305,13 +327,14 @@ def get_audit_log(conn, entity_type=None, entity_id=None, limit=200):
 # =============================================================================
 
 def search_merchants(conn, query, limit=200):
-    q = f"%{query}%"
+    q = f"%{query.lower()}%"
     rows = conn.execute(
         """
         SELECT DISTINCT m.id, m.m_id, m.merchant_type, m.note
         FROM merchants m
         LEFT JOIN terminal_ids ti ON ti.merchant_id = m.id
-        WHERE m.m_id LIKE ? OR ti.owner_label LIKE ? OR ti.point_label LIKE ?
+        WHERE PYLOWER(m.m_id) LIKE ? OR PYLOWER(ti.owner_label) LIKE ?
+           OR PYLOWER(ti.point_label) LIKE ?
         ORDER BY m.m_id
         LIMIT ?
         """,
@@ -329,8 +352,8 @@ def list_all_merchants(conn, query=None, limit=1000):
     """
     params = []
     if query:
-        q = f"%{query}%"
-        sql += " AND (m.m_id LIKE ? OR m.note LIKE ?)"
+        q = f"%{query.lower()}%"
+        sql += " AND (PYLOWER(m.m_id) LIKE ? OR PYLOWER(m.note) LIKE ?)"
         params += [q, q]
     sql += " ORDER BY m.merchant_type, m.m_id LIMIT ?"
     params.append(limit)
@@ -421,8 +444,8 @@ def list_all_terminals(conn, query=None, is_epos=None, limit=2000):
         sql += " AND t.is_epos = ?"
         params.append(1 if is_epos else 0)
     if query:
-        q = f"%{query}%"
-        sql += " AND (t.serial_number LIKE ? OR t.model LIKE ?)"
+        q = f"%{query.lower()}%"
+        sql += " AND (PYLOWER(t.serial_number) LIKE ? OR PYLOWER(t.model) LIKE ?)"
         params += [q, q]
     sql += " ORDER BY t.serial_number LIMIT ?"
     params.append(limit)
@@ -430,7 +453,7 @@ def list_all_terminals(conn, query=None, is_epos=None, limit=2000):
 
 
 def search_terminals(conn, query, limit=200):
-    q = f"%{query}%"
+    q = f"%{query.lower()}%"
     rows = conn.execute(
         """
         SELECT DISTINCT t.id, t.serial_number, t.model, t.ownership, t.connection_type,
@@ -441,9 +464,11 @@ def search_terminals(conn, query, limit=200):
         LEFT JOIN terminal_ids ti ON ti.id = b.terminal_id_ref
         LEFT JOIN merchants m ON m.id = ti.merchant_id
         LEFT JOIN connection_history ch ON ch.terminal_id = t.id AND ch.valid_to IS NULL
-        WHERE t.serial_number LIKE ? OR t.model LIKE ?
-           OR ti.payment_id LIKE ? OR ti.owner_label LIKE ? OR ti.point_label LIKE ?
-           OR m.m_id LIKE ? OR ch.sim_number LIKE ? OR ch.ip_address LIKE ?
+        WHERE PYLOWER(t.serial_number) LIKE ? OR PYLOWER(t.model) LIKE ?
+           OR PYLOWER(ti.payment_id) LIKE ? OR PYLOWER(ti.owner_label) LIKE ?
+           OR PYLOWER(ti.point_label) LIKE ?
+           OR PYLOWER(m.m_id) LIKE ? OR PYLOWER(ch.sim_number) LIKE ?
+           OR PYLOWER(ch.ip_address) LIKE ?
         ORDER BY t.serial_number
         LIMIT ?
         """,
@@ -630,8 +655,20 @@ def update_repair(conn, repair_id, user_id, **fields):
 def write_off_terminal(conn, terminal_id, reason, user, comment=None):
     if user.get("role") != "admin":
         raise PermissionError("Списывать терминалы может только администратор")
+    existing = conn.execute(
+        "SELECT id FROM terminal_writeoffs WHERE terminal_id = ?", (terminal_id,)
+    ).fetchone()
+    if existing is not None:
+        raise ValueError("Этот терминал уже списан -- повторное списание невозможно")
+    # Закрываем все активные привязки списываемого терминала
     conn.execute(
-        "INSERT INTO terminal_writeoffs (terminal_id, reason, comment, approved_by) VALUES (?, ?, ?, ?)",
+        "UPDATE terminal_id_bindings SET bound_to = datetime('now') "
+        "WHERE terminal_id = ? AND bound_to IS NULL",
+        (terminal_id,),
+    )
+    conn.execute(
+        "INSERT INTO terminal_writeoffs (terminal_id, reason, comment, approved_by) "
+        "VALUES (?, ?, ?, ?)",
         (terminal_id, reason, comment, user["id"]),
     )
 
@@ -696,10 +733,12 @@ def get_active_terminal_ids(conn, merchant_type=None, query=None, model=None, ow
         sql += " AND t.ownership = ?"
         params.append(ownership)
     if query:
-        q = f"%{query}%"
+        q = f"%{query.lower()}%"
         sql += (
-            " AND (ti.payment_id LIKE ? OR ti.owner_label LIKE ? OR ti.point_label LIKE ? "
-            "OR m.m_id LIKE ? OR t.serial_number LIKE ? OR ti.address LIKE ? OR ti.phone LIKE ?)"
+            " AND (PYLOWER(ti.payment_id) LIKE ? OR PYLOWER(ti.owner_label) LIKE ? "
+            "OR PYLOWER(ti.point_label) LIKE ? "
+            "OR PYLOWER(m.m_id) LIKE ? OR PYLOWER(t.serial_number) LIKE ? "
+            "OR PYLOWER(ti.address) LIKE ? OR PYLOWER(ti.phone) LIKE ?)"
         )
         params += [q, q, q, q, q, q, q]
     sql += " ORDER BY m.merchant_type, ti.owner_label, ti.payment_id LIMIT ?"
@@ -804,8 +843,8 @@ def get_warehouse_terminals(conn, query=None, model=None, ownership=None, limit=
     if ownership:
         sql += " AND t.ownership = ?"; params.append(ownership)
     if query:
-        q = f"%{query}%"
-        sql += " AND (t.serial_number LIKE ? OR t.model LIKE ?)"
+        q = f"%{query.lower()}%"
+        sql += " AND (PYLOWER(t.serial_number) LIKE ? OR PYLOWER(t.model) LIKE ?)"
         params += [q, q]
     sql += " ORDER BY lp.moved_at DESC LIMIT ?"
     params.append(limit)
@@ -848,8 +887,8 @@ def get_written_off_terminals(conn, query=None, model=None, ownership=None, limi
     if ownership:
         sql += " AND t.ownership = ?"; params.append(ownership)
     if query:
-        q = f"%{query}%"
-        sql += " AND (t.serial_number LIKE ? OR t.model LIKE ?)"
+        q = f"%{query.lower()}%"
+        sql += " AND (PYLOWER(t.serial_number) LIKE ? OR PYLOWER(t.model) LIKE ?)"
         params += [q, q]
     sql += " ORDER BY w.written_off_at DESC LIMIT ?"
     params.append(limit)
@@ -878,8 +917,9 @@ def get_epos_terminals(conn, query=None, model=None, limit=2000):
     if model:
         sql += " AND t.model = ?"; params.append(model)
     if query:
-        q = f"%{query}%"
-        sql += " AND (ti.payment_id LIKE ? OR ti.owner_label LIKE ? OR ti.point_label LIKE ? OR m.m_id LIKE ?)"
+        q = f"%{query.lower()}%"
+        sql += (" AND (PYLOWER(ti.payment_id) LIKE ? OR PYLOWER(ti.owner_label) LIKE ? "
+                "OR PYLOWER(ti.point_label) LIKE ? OR PYLOWER(m.m_id) LIKE ?)")
         params += [q, q, q, q]
     sql += " ORDER BY m.merchant_type, ti.owner_label LIMIT ?"
     params.append(limit)

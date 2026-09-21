@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Карточка физического терминала."""
+"""Карточка физического терминала: просмотр + редактирование (с блокировкой)."""
 
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
@@ -197,7 +197,6 @@ class TerminalCard(tk.Toplevel):
                  f"Состояние: {data['condition']}"
         )
 
-        # Активные ID
         self.ids_tree.delete(*self.ids_tree.get_children())
         self._binding_ids_by_iid.clear()
         for b in data["bindings"]:
@@ -210,7 +209,6 @@ class TerminalCard(tk.Toplevel):
             ))
             self._binding_ids_by_iid[iid] = (b["id"], b["bound_to"])
 
-        # SN история (закрытые привязки)
         self.history_tree.delete(*self.history_tree.get_children())
         for b in data["bindings"]:
             if b["bound_to"] is None:
@@ -342,10 +340,11 @@ class TerminalCard(tk.Toplevel):
         with database.get_connection() as conn:
             try:
                 database.write_off_terminal(conn, self.terminal_id, reason, self.user)
-            except PermissionError as exc:
+            except (PermissionError, ValueError) as exc:
                 messagebox.showerror("Ошибка", str(exc), parent=self)
                 return
         self._load()
+        messagebox.showinfo("Готово", "Терминал списан.", parent=self)
 
     def _close_selected_id(self):
         if self.read_only:
