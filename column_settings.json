@@ -28,8 +28,8 @@
   },
   "warehouse": {
     "widths": {
-      "#0": 374,
-      "num": 74,
+      "#0": 92,
+      "num": 251,
       "sn": 144,
       "model": 144,
       "own": 103,
@@ -37,7 +37,8 @@
       "condition": 133,
       "moved_by": 163,
       "moved_at": 163,
-      "comment": 194
+      "comment": 194,
+      "broken": 110
     }
   },
   "written_off": {

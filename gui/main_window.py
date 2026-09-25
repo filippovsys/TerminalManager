@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Главное окно: вкладки под сводкой, дерево с группировкой
-Тип клиента -> Физ.терминал -> ID."""
+"""Главное окно."""
 
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
@@ -17,6 +16,7 @@ from gui.merchants_list_window import MerchantsListWindow
 from gui.terminals_list_window import TerminalsListWindow
 from gui.new_id_dialog import NewIdDialog
 from gui.edit_id_dialog import EditIdDialog
+from gui.repair_dialog import RepairDialog
 
 TYPE_LABELS = {"bank": "BANK", "edara": "EDARA", "telekeci": "TELEKEÇI", "hk": "H/K"}
 PLACE_LABELS = {"merchant": "У клиента", "warehouse": "Склад", "repair_shop": "Мастерская"}
@@ -45,12 +45,13 @@ def _column_spec():
             {"point": 260, "address": 190, "phone": 120, "own": 70, "owner": 200},
         ),
         "warehouse": (
-            ("num", "sn", "model", "own", "place", "condition", "moved_by", "moved_at", "comment"),
+            ("num", "sn", "model", "own", "place", "condition", "broken",
+             "moved_by", "moved_at", "comment"),
             {"num": "№", "sn": "S/N", "model": "Модель", "own": "Собств.",
-             "place": "Место", "condition": "Состояние",
+             "place": "Место", "condition": "Состояние", "broken": "Исправность",
              "moved_by": "Кем перемещён", "moved_at": "Когда", "comment": "Комментарий"},
             {"num": 40, "sn": 110, "model": 110, "own": 70, "place": 90,
-             "condition": 100, "moved_by": 130, "moved_at": 130, "comment": 160},
+             "condition": 100, "broken": 110, "moved_by": 130, "moved_at": 130, "comment": 160},
         ),
         "written_off": (
             ("num", "sn", "model", "own", "written_off_at", "reason", "comment", "approved_by"),
@@ -122,8 +123,7 @@ class MainWindow(tk.Tk):
 
         self.title(f"Terminal Manager v{config.APP_VERSION} -- {user['full_name']} ({user['role']})")
 
-        # Разворачиваем на весь экран (не блокирует кнопку свернуть/закрыть)
-        self.geometry("1360x780")  # fallback
+        self.geometry("1360x780")
         try:
             self.state("zoomed")
         except Exception:
@@ -135,7 +135,6 @@ class MainWindow(tk.Tk):
         self._style = ttk.Style(self)
         self._style.configure("Selected.TButton", font=("TkDefaultFont", 9, "bold"))
 
-        # Контекстное меню (правый клик по строке дерева)
         self.context_menu = tk.Menu(self, tearoff=0)
 
         self._build_menu()
@@ -146,13 +145,9 @@ class MainWindow(tk.Tk):
 
         self._select_tab("active")
 
-    # ------------------------------------------------------------------
-    # Меню
-    # ------------------------------------------------------------------
     def _build_menu(self):
         menubar = tk.Menu(self)
 
-        # --- Файл ---
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="Экспорт текущей вкладки в Excel...",
                               command=self._export_current_tab)
@@ -160,7 +155,6 @@ class MainWindow(tk.Tk):
         file_menu.add_command(label="Выход", command=self.destroy)
         menubar.add_cascade(label="Файл", menu=file_menu)
 
-        # --- Операции ---
         ops_menu = tk.Menu(menubar, tearoff=0)
         ops_menu.add_command(label="Выдать новый ID...", command=self._open_new_id_dialog)
         ops_menu.add_separator()
@@ -177,7 +171,6 @@ class MainWindow(tk.Tk):
                              command=self._move_selected_terminals)
         menubar.add_cascade(label="Операции", menu=ops_menu)
 
-        # --- Справочники ---
         refs_menu = tk.Menu(menubar, tearoff=0)
         refs_menu.add_command(label="Мерчанты...", command=self._open_merchants_list)
         refs_menu.add_command(label="Терминалы...", command=self._open_terminals_list)
@@ -185,19 +178,16 @@ class MainWindow(tk.Tk):
         refs_menu.add_command(label="Настройки колонок...", command=self._open_column_settings)
         menubar.add_cascade(label="Справочники", menu=refs_menu)
 
-        # --- Отчёты ---
         reports_menu = tk.Menu(menubar, tearoff=0)
         reports_menu.add_command(label="По моделям терминалов...", command=self._open_models_report)
         reports_menu.add_command(label="Отчёт по клиенту...", command=self._open_selected_merchant_report)
         menubar.add_cascade(label="Отчёты", menu=reports_menu)
 
-        # --- Администрирование ---
         if self.user["role"] == "admin":
             admin_menu = tk.Menu(menubar, tearoff=0)
             admin_menu.add_command(label="Пользователи...", command=self._open_users_window)
             menubar.add_cascade(label="Администрирование", menu=admin_menu)
 
-        # --- Справка ---
         help_menu = tk.Menu(menubar, tearoff=0)
         help_menu.add_command(label="Открыть папку с логами", command=self._open_logs_folder)
         help_menu.add_separator()
@@ -244,18 +234,13 @@ class MainWindow(tk.Tk):
         except Exception as exc:
             messagebox.showerror("Ошибка", f"Не удалось открыть папку:\n{exc}", parent=self)
 
-    # ------------------------------------------------------------------
-    # Действия по выделенной строке (меню верхнее + контекстное)
-    # ------------------------------------------------------------------
     def _get_single_selection_info(self):
-        """Если выделена ровно одна строка -- возвращает её info. Иначе None."""
         sel = self.tree.selection()
         if len(sel) != 1:
             return None
         return self._row_by_iid.get(sel[0])
 
     def _resolve_terminal_id_from_selection(self):
-        """Возвращает terminal_id по выделенной строке (или None)."""
         info = self._get_single_selection_info()
         if info is None:
             return None
@@ -272,7 +257,6 @@ class MainWindow(tk.Tk):
         return None
 
     def _resolve_merchant_id_from_selection(self):
-        """Возвращает merchant_id по выделенной строке (или None)."""
         info = self._get_single_selection_info()
         if info is None:
             return None
@@ -303,7 +287,6 @@ class MainWindow(tk.Tk):
         return None
 
     def _resolve_terminal_id_ref_from_selection(self):
-        """Возвращает terminal_ids.id (не binding, а саму запись) по выделению."""
         info = self._get_single_selection_info()
         if info is None:
             return None
@@ -374,6 +357,42 @@ class MainWindow(tk.Tk):
             messagebox.showerror("Ошибка экспорта", str(exc), parent=self)
             return
         messagebox.showinfo("Готово", f"Файл сохранён:\n{path}", parent=self)
+
+    # ------------------------------------------------------------------
+    # Новые действия для пометки «не работает»
+    # ------------------------------------------------------------------
+    def _toggle_broken_from_row(self, terminal_id, new_state):
+        try:
+            with database.get_connection() as conn:
+                database.set_terminal_broken(conn, terminal_id, new_state, self.user["id"])
+        except Exception as exc:
+            messagebox.showerror("Ошибка", str(exc), parent=self)
+            return
+        self._refresh_current_list()
+
+    def _send_to_repair_from_row(self, terminal_id):
+        dlg = RepairDialog(self, self.user, terminal_id)
+        if dlg.result:
+            self._refresh_current_list()
+
+    def _write_off_from_row(self, terminal_id):
+        if self.user["role"] != "admin":
+            messagebox.showinfo("Инфо", "Списывать терминалы может только администратор.", parent=self)
+            return
+        reason = simpledialog.askstring("Списание", "Причина списания:", parent=self)
+        if reason is None:
+            return
+        if not messagebox.askyesno("Подтверждение",
+                                   "Списание необратимо. Продолжить?", parent=self):
+            return
+        try:
+            with database.get_connection() as conn:
+                database.write_off_terminal(conn, terminal_id, reason, self.user)
+        except Exception as exc:
+            messagebox.showerror("Ошибка", str(exc), parent=self)
+            return
+        messagebox.showinfo("Готово", "Терминал списан.", parent=self)
+        self._refresh_current_list()
 
     # ------------------------------------------------------------------
     # Массовые операции
@@ -536,8 +555,11 @@ class MainWindow(tk.Tk):
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_select())
         self.tree.bind("<Double-1>", lambda e: self._on_double_click())
         self.tree.bind("<Button-3>", self._on_right_click)
+
         self.tree.tag_configure("group", font=("TkDefaultFont", 9, "bold"), background="#d9e2ef")
         self.tree.tag_configure("terminal", font=("TkDefaultFont", 9, "bold"), background="#eef3f9")
+        # Красная подсветка неработающих терминалов
+        self.tree.tag_configure("broken", background="#f8d7da", foreground="#7a1519")
 
         self.detail_body = ttk.Frame(self.detail_frame)
         self.detail_body.pack(fill="both", expand=True)
@@ -701,7 +723,8 @@ class MainWindow(tk.Tk):
                 stats = database.get_warehouse_dashboard_stats(conn)
             self._render_warehouse_tree(rows)
             self._set_stats([
-                f"На складе: {stats['warehouse']}",
+                f"На складе: {stats['warehouse']}   "
+                f"(работают: {stats['working']}, не работают: {stats['broken']})",
                 f"В мастерской: {stats['repair_shop']}",
                 f"Всего: {stats['total']}",
             ])
@@ -864,13 +887,17 @@ class MainWindow(tk.Tk):
         self._row_by_iid = {}
         for i, r in enumerate(rows, start=1):
             place_text = PLACE_LABELS.get(r["current_place"], r["current_place"])
+            is_broken = int(r.get("is_broken") or 0)
+            broken_text = "НЕ РАБОТАЕТ" if is_broken else "Работает"
             vmap = {"num": i, "sn": r["serial_number"] or "(без S/N)", "model": r["model"] or "",
                     "own": OWNERSHIP_SHORT.get(r["ownership"], ""), "place": place_text,
                     "condition": CONDITION_LABELS.get(r["condition"], r["condition"]),
+                    "broken": broken_text,
                     "moved_by": r["moved_by_name"] or "", "moved_at": r["last_moved_at"] or "",
                     "comment": r["last_comment"] or ""}
             v = tuple(vmap.get(c, "") for c in self._current_cols)
-            iid = self.tree.insert("", "end", text="", values=v, tags=("item",))
+            tags = ("broken",) if is_broken else ("item",)
+            iid = self.tree.insert("", "end", text="", values=v, tags=tags)
             self._row_by_iid[iid] = ("warehouse", r["terminal_id"], r)
 
     def _render_written_off_tree(self, rows):
@@ -886,9 +913,6 @@ class MainWindow(tk.Tk):
             iid = self.tree.insert("", "end", text="", values=v, tags=("item",))
             self._row_by_iid[iid] = ("written_off", r["terminal_id"], r)
 
-    # ------------------------------------------------------------------
-    # Контекстное меню (правый клик по строке)
-    # ------------------------------------------------------------------
     def _on_right_click(self, event):
         iid = self.tree.identify_row(event.y)
         if not iid:
@@ -934,12 +958,35 @@ class MainWindow(tk.Tk):
             self.context_menu.add_separator()
             self.context_menu.add_command(label="Отчёт по клиенту...",
                                           command=self._open_selected_merchant_report)
-        elif kind in ("warehouse", "written_off"):
+        elif kind == "warehouse":
+            terminal_id = info[1]
+            row = info[2]
+            is_broken = int(row.get("is_broken") or 0)
+
             self.context_menu.add_command(label="Карточка терминала",
                                           command=self._open_selected_terminal_card)
             self.context_menu.add_separator()
+            if is_broken:
+                self.context_menu.add_command(
+                    label="Снять пометку «Не работает»",
+                    command=lambda: self._toggle_broken_from_row(terminal_id, False))
+            else:
+                self.context_menu.add_command(
+                    label="Пометить как НЕ РАБОТАЮЩИЙ",
+                    command=lambda: self._toggle_broken_from_row(terminal_id, True))
+            self.context_menu.add_command(
+                label="Отправить в ремонт...",
+                command=lambda: self._send_to_repair_from_row(terminal_id))
+            if self.user["role"] == "admin":
+                self.context_menu.add_command(
+                    label="Списать...",
+                    command=lambda: self._write_off_from_row(terminal_id))
+            self.context_menu.add_separator()
             self.context_menu.add_command(label="Переместить терминал...",
                                           command=self._move_selected_terminals)
+        elif kind == "written_off":
+            self.context_menu.add_command(label="Карточка терминала",
+                                          command=self._open_selected_terminal_card)
         elif kind == "type_node":
             self.context_menu.add_command(label="Закрыть выбранные ID...",
                                           command=self._close_selected_ids)
@@ -950,9 +997,6 @@ class MainWindow(tk.Tk):
                 self.context_menu.add_command(label="Редактировать ID...",
                                               command=self._edit_selected_id)
 
-    # ------------------------------------------------------------------
-    # Обработка выбора
-    # ------------------------------------------------------------------
     def _on_select(self):
         selection = self.tree.selection()
         if not selection:
@@ -1080,12 +1124,14 @@ class MainWindow(tk.Tk):
             return
         t = d["terminal"]
         active_ids = [b for b in d["bindings"] if b["bound_to"] is None]
+        is_broken = int(t.get("is_broken") or 0)
         fields = [
             ("S/N", t["serial_number"] or "(без S/N)"),
             ("Модель", t["model"]),
             ("Собственность", OWNERSHIP_SHORT.get(t["ownership"], t["ownership"])),
             ("Место", PLACE_LABELS.get(d["current_place"], d["current_place"])),
             ("Состояние", CONDITION_LABELS.get(d["condition"], d["condition"])),
+            ("Исправность", "НЕ РАБОТАЕТ" if is_broken else "Работает"),
             ("Активных ID", str(len(active_ids))),
             ("", ""),
             ("Действия", "Правый клик по строке или меню «Операции» / «Отчёты»"),
@@ -1094,17 +1140,19 @@ class MainWindow(tk.Tk):
 
     def _show_warehouse_detail(self, terminal_id, row):
         place_text = PLACE_LABELS.get(row["current_place"], row["current_place"])
+        is_broken = int(row.get("is_broken") or 0)
         fields = [
             ("S/N", row["serial_number"] or "(без S/N)"),
             ("Модель", row["model"]),
             ("Собственность", OWNERSHIP_SHORT.get(row["ownership"], row["ownership"])),
             ("Место", place_text),
             ("Состояние", CONDITION_LABELS.get(row["condition"], row["condition"])),
+            ("Исправность", "НЕ РАБОТАЕТ" if is_broken else "Работает"),
             ("Кем перемещён", row["moved_by_name"]),
             ("Когда", row["last_moved_at"]),
             ("Комментарий", row["last_comment"]),
             ("", ""),
-            ("Действия", "Правый клик по строке или меню «Операции»"),
+            ("Действия", "Правый клик по строке для быстрых действий"),
         ]
         self._show_detail(fields, [])
 

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Карточка физического терминала: просмотр + редактирование (с блокировкой)."""
+"""Карточка физического терминала."""
 
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
@@ -20,8 +20,6 @@ CONDITION_LABELS = {
 
 
 class MoveDialog(tk.Toplevel):
-    """Диалог перемещения: только кнопки."""
-
     def __init__(self, master, current_place):
         super().__init__(master)
         self.title("Переместить терминал")
@@ -64,7 +62,7 @@ class TerminalCard(tk.Toplevel):
         self.read_only = False
 
         self.title("Терминал")
-        self.geometry("800x640")
+        self.geometry("820x660")
 
         with database.get_connection() as conn:
             ok, lock_info = database.acquire_lock(conn, "terminal", terminal_id, user["id"])
@@ -106,9 +104,11 @@ class TerminalCard(tk.Toplevel):
         ttk.Label(top, text="Заметка:").grid(row=3, column=0, sticky="w")
         ttk.Entry(top, textvariable=self.note_var, width=40).grid(row=3, column=1, sticky="w")
 
-        self.state_label = ttk.Label(top, text="", foreground="blue")
-        self.state_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        # --- Крупная строка состояния (с цветом) ---
+        self.state_label = ttk.Label(top, text="", font=("TkDefaultFont", 11, "bold"))
+        self.state_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
+        # --- Кнопки ---
         btns = ttk.Frame(top)
         btns.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Button(btns, text="Сохранить", command=self._save).pack(side="left", padx=2)
@@ -116,15 +116,21 @@ class TerminalCard(tk.Toplevel):
         ttk.Button(btns, text="Переместить...", command=self._move).pack(side="left", padx=2)
         ttk.Button(btns, text="Ремонт...", command=self._open_repair).pack(side="left", padx=2)
         ttk.Button(btns, text="Добавить ID...", command=self._add_id).pack(side="left", padx=2)
+
+        self.broken_btn = ttk.Button(btns, text="Пометить как неработающий",
+                                      command=self._toggle_broken)
+        self.broken_btn.pack(side="left", padx=2)
+
         self.writeoff_btn = ttk.Button(btns, text="Списать", command=self._write_off)
         self.writeoff_btn.pack(side="left", padx=2)
         if self.user["role"] != "admin":
             self.writeoff_btn.state(["disabled"])
 
+        # --- Вкладки ---
         notebook = ttk.Notebook(self)
         notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # --- "Активные ID" ---
+        # Активные ID
         ids_frame = ttk.Frame(notebook)
         notebook.add(ids_frame, text="Активные ID")
         ids_cols = ("payment_id", "transit_account", "settlement_account", "m_id",
@@ -140,7 +146,6 @@ class TerminalCard(tk.Toplevel):
             self.ids_tree.column(c, width=100, anchor="w")
         self.ids_tree.pack(fill="both", expand=True)
         self.ids_tree.bind("<Double-1>", lambda e: self._edit_selected_id())
-
         self._binding_ids_by_iid = {}
 
         btns_below = ttk.Frame(ids_frame)
@@ -151,7 +156,7 @@ class TerminalCard(tk.Toplevel):
                                         command=self._close_selected_id)
         self.close_id_btn.pack(side="left", padx=2)
 
-        # --- "SN история" ---
+        # SN история
         hist_frame = ttk.Frame(notebook)
         notebook.add(hist_frame, text="SN история")
         hist_cols = ("payment_id", "owner_label", "point_label", "m_id", "bound_from", "bound_to")
@@ -210,11 +215,34 @@ class TerminalCard(tk.Toplevel):
         self.model_var.set(t["model"] or "")
         self.ownership_var.set(t["ownership"])
         self.note_var.set(t["note"] or "")
-        self.state_label.config(
-            text=f"Место: {PLACE_LABELS.get(data['current_place'], data['current_place'])}   "
-                 f"Состояние: {CONDITION_LABELS.get(data['condition'], data['condition'])}"
-        )
 
+        # --- Цветная строка состояния ---
+        place_text = PLACE_LABELS.get(data["current_place"], data["current_place"] or "—")
+        cond = data["condition"] or "normal"
+        is_broken = int(t.get("is_broken") or 0)
+
+        if cond == "written_off":
+            text = f"Место: {place_text}   •   ✕ СПИСАН"
+            color = "#8B0000"   # тёмно-красный
+        elif cond == "in_repair":
+            text = f"Место: {place_text}   •   ⚙ В ремонте"
+            color = "#B8860B"   # тёмно-оранжевый
+        elif is_broken:
+            text = f"Место: {place_text}   •   ⚠ НЕ РАБОТАЕТ"
+            color = "#D00000"   # яркий красный
+        else:
+            text = f"Место: {place_text}   •   ✓ Норма"
+            color = "#006400"   # тёмно-зелёный
+
+        self.state_label.config(text=text, foreground=color)
+
+        # Кнопка-переключатель пометки
+        if is_broken:
+            self.broken_btn.configure(text="Снять пометку «Не работает»")
+        else:
+            self.broken_btn.configure(text="Пометить как неработающий")
+
+        # Активные ID
         self.ids_tree.delete(*self.ids_tree.get_children())
         self._binding_ids_by_iid.clear()
         for b in data["bindings"]:
@@ -227,6 +255,7 @@ class TerminalCard(tk.Toplevel):
             ))
             self._binding_ids_by_iid[iid] = (b["id"], b["bound_to"])
 
+        # SN история
         self.history_tree.delete(*self.history_tree.get_children())
         for b in data["bindings"]:
             if b["bound_to"] is None:
@@ -270,6 +299,26 @@ class TerminalCard(tk.Toplevel):
             )
         self._load()
         messagebox.showinfo("Готово", "Изменения сохранены", parent=self)
+
+    def _toggle_broken(self):
+        if self.read_only:
+            return
+        current = int(self.data["terminal"].get("is_broken") or 0)
+        if current:
+            question = "Снять пометку «Не работает»?\n\nТерминал снова будет считаться рабочим."
+        else:
+            question = ("Пометить терминал как НЕ РАБОТАЮЩИЙ?\n\n"
+                        "Он будет отображаться красным на складе.\n"
+                        "Это не списание и не ремонт -- просто пометка.")
+        if not messagebox.askyesno("Подтверждение", question, parent=self):
+            return
+        try:
+            with database.get_connection() as conn:
+                database.set_terminal_broken(conn, self.terminal_id, not current, self.user["id"])
+        except Exception as exc:
+            messagebox.showerror("Ошибка", str(exc), parent=self)
+            return
+        self._load()
 
     def _change_connection(self):
         if self.read_only:
